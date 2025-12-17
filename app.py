@@ -14,7 +14,13 @@ sys.path.append(str(Path(__file__).parent))
 from src.processors.document_processor import DocumentProcessor
 from src.database.vector_store import VectorStore
 from src.utils.file_utils import FileUtils
-from src.utils.config import DOCUMENTS_DIR, IMAGES_DIR, VECTOR_STORE_DIR
+from src.utils.config import (
+	DOCUMENTS_DIR,
+	IMAGES_DIR,
+	VECTOR_STORE_DIR,
+	SUPPORTED_IMAGE_EXTENSIONS,
+	SUPPORTED_TEXT_EXTENSIONS,
+)
 
 # Initialize components
 processor = DocumentProcessor(device="cpu")
@@ -165,69 +171,164 @@ async def search_documents(search_query: SearchQuery):
 		if search_query.path:
 			folder_path = search_query.path
 			from pathlib import Path
+			import numpy as np
+
+			# Validate selectable options
+			allowed_file_types = {"all", "pdf", "docx", "txt", "image", "pptx", "xlsx"}
+			allowed_doc_types = {"document", "image", "spreadsheet", "presentation"}
+
+			ft = (search_query.file_type or "all").lower()
+			dt = (search_query.doc_type or "").lower() if hasattr(search_query, "doc_type") else ""
+
+			if ft not in allowed_file_types:
+				raise HTTPException(status_code=400, detail=f"Unsupported file_type: {ft}. Allowed: {sorted(list(allowed_file_types))}")
+			if dt and dt not in allowed_doc_types:
+				raise HTTPException(status_code=400, detail=f"Unsupported doc_type: {dt}. Allowed: {sorted(list(allowed_doc_types))}")
 
 			p = Path(folder_path)
 			if not p.exists() or not p.is_dir():
 				raise HTTPException(status_code=400, detail=f"Path does not exist or is not a directory: {folder_path}")
 
-			# Gather supported files from folder (text/pdf/docx/txt)
+			# Gather supported files from folder (non-recursive)
 			files = FileUtils.get_all_files(p)
-			# Filter to text/document extensions only
-			text_files = [f for f in files if FileUtils.is_text_file(str(f))]
 
-			# Process files and build chunk embeddings on the fly
+			# Helper: infer doc_type from extension
+			def infer_doc_type(ext: str) -> str:
+				ext = ext.lower()
+				if ext in [".pdf", ".doc", ".docx", ".txt"]:
+					return "document"
+				if ext in SUPPORTED_IMAGE_EXTENSIONS:
+					return "image"
+				if ext in [".xls", ".xlsx"]:
+					return "spreadsheet"
+				if ext in [".ppt", ".pptx"]:
+					return "presentation"
+				return "document"
+
+			# Filter files by requested file_type/doc_type
+			filtered_files = []
+			for f in files:
+				ext = f.suffix.lower()
+				inferred = infer_doc_type(ext)
+				# apply doc_type filter if provided
+				if dt:
+					if inferred != dt:
+						continue
+				# apply file_type filter
+				if ft != "all":
+					# ft may be an extension name (pdf, docx, txt, image)
+					if ft == "image":
+						if inferred != "image":
+							continue
+					else:
+						# expect e.g. 'pdf' -> '.pdf'
+						if ext != f".{ft}":
+							continue
+
+				filtered_files.append(f)
+
+			if not filtered_files:
+				return {"query": query, "results": [], "count": 0, "source": "folder"}
+
+			# Prepare processors
 			from src.processors.pdf_processor import PDFProcessor
 			pdf_proc = PDFProcessor()
 
-			chunks = []  # each item: dict with keys: file, text, embedding
-			total_chunks = 0
-			for f in text_files:
-				try:
-					# Use DocumentProcessor helpers to extract text
-					result = processor.process_file(str(f))
-					text = result.get("text", "")
-					file_name = f.name
+			chunks = []  # each: {file, text, embedding}
+			failures = []
 
-					# Get chunks: if processor returned chunks (PDF), use them, else chunk the text
+			for f in filtered_files:
+				try:
+					result = processor.process_file(str(f))
+					file_name = f.name
+					inferred = infer_doc_type(f.suffix.lower())
+
+					# If image, get image embedding and description/ocr
+					if inferred == "image":
+						# image embedding (CLIP)
+						image_embedding = None
+						if "embedding" in result and result["embedding"]:
+							image_embedding = np.array(result["embedding"])
+						else:
+							# try to generate via image processor
+							image_embedding = processor.image_processor.get_image_embedding(str(f))
+
+						# store as a single chunk per image with descriptive text
+						desc = result.get("description", "") or result.get("ocr_text", "") or ""
+						chunks.append({"file": file_name, "text": desc, "embedding": image_embedding, "is_image": True})
+						continue
+
+					# For documents, get chunks
 					if "chunks" in result and result["chunks"]:
 						file_chunks = result["chunks"]
 					else:
+						text = result.get("text", "")
 						file_chunks = pdf_proc.chunk_text(text)
 
-					# Generate embeddings for each chunk
 					for ch in file_chunks:
 						chunk_text = ch["text"] if isinstance(ch, dict) else str(ch)
 						emb = vector_store.embedding_model.encode(chunk_text)
-						chunks.append({"file": file_name, "text": chunk_text, "embedding": emb})
-						total_chunks += 1
+						chunks.append({"file": file_name, "text": chunk_text, "embedding": np.array(emb), "is_image": False})
+
 				except Exception as e:
-					print(f"Failed to process {f}: {e}")
+					failures.append({"file": str(f), "error": str(e)})
 
-			if total_chunks == 0:
-				return {"query": query, "results": [], "count": 0, "source": "folder"}
+			if not chunks:
+				return {"query": query, "results": [], "count": 0, "failures": failures, "source": "folder"}
 
-			# Encode query
-			query_emb = vector_store.embedding_model.encode(query)
-			import numpy as np
+			# Compute query embedding and similarity
+			# If there are image chunks and no text chunks, use CLIP text encoder; otherwise use sentence-transformers for text
+			has_image_chunks = any(c.get("is_image") for c in chunks)
+			has_text_chunks = any(not c.get("is_image") for c in chunks)
 
-			print(f"[DEBUG] Folder search - total chunks: {total_chunks}")
-			print(f"[DEBUG] Folder search - query embedding shape: {np.array(query_emb).shape}")
+			results_out = []
 
-			# Compute cosine similarities
-			sims = []
-			qv = np.array(query_emb)
-			qnorm = np.linalg.norm(qv)
-			for item in chunks:
-				ev = np.array(item["embedding"])
-				denom = (np.linalg.norm(ev) * qnorm)
-				score = float(np.dot(qv, ev) / denom) if denom != 0 else 0.0
-				sims.append({"file": item["file"], "text": item["text"][:500], "score": score})
+			if has_image_chunks and not has_text_chunks:
+				# Use CLIP text encoder for queries
+				try:
+					import clip
+					import torch
+					img_proc = processor.image_processor
+					tokenized = clip.tokenize([query]).to(img_proc.device)
+					with torch.no_grad():
+						text_feat = img_proc.model.encode_text(tokenized)
+					qv = text_feat.cpu().numpy()[0]
+					qnorm = np.linalg.norm(qv)
 
-			# Sort and return top N
-			sims = sorted(sims, key=lambda x: x["score"], reverse=True)
-			top_n = sims[: search_query.limit]
+					for c in chunks:
+						ev = np.array(c["embedding"])
+						denom = (np.linalg.norm(ev) * qnorm)
+						score = float(np.dot(qv, ev) / denom) if denom != 0 else 0.0
+						results_out.append({"file": c["file"], "text": (c.get("text") or "")[:500], "score": score})
 
-			return {"query": query, "results": top_n, "count": len(top_n), "source": "folder"}
+				except Exception as e:
+					raise HTTPException(status_code=500, detail=f"CLIP encoding failed: {e}")
+
+			else:
+				# Use sentence-transformers embedding for query
+				qv = np.array(vector_store.embedding_model.encode(query))
+				qnorm = np.linalg.norm(qv)
+
+				for c in chunks:
+					ev = np.array(c["embedding"])
+					denom = (np.linalg.norm(ev) * qnorm)
+					score = float(np.dot(qv, ev) / denom) if denom != 0 else 0.0
+					results_out.append({"file": c["file"], "text": (c.get("text") or "")[:500], "score": score})
+
+			# Sort, dedupe by file keeping best score per file, and return top-N
+			results_out = sorted(results_out, key=lambda x: x["score"], reverse=True)
+			seen = {}
+			deduped = []
+			for r in results_out:
+				if r["file"] not in seen:
+					seen[r["file"]] = True
+					deduped.append(r)
+			top_n = deduped[: search_query.limit]
+
+			response = {"query": query, "results": top_n, "count": len(top_n), "source": "folder"}
+			if failures:
+				response["failures"] = failures
+			return response
         
 		# Perform search based on file type
 		if search_query.file_type == "text":

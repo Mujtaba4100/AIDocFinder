@@ -7,6 +7,10 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import concurrent.futures
+import hashlib
+import pickle
+import time
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
@@ -66,225 +70,188 @@ class StatsResponse(BaseModel):
 	image_documents: int
 	total_documents: int
 
-@app.get("/", response_class=HTMLResponse)
-async def home():
-	"""Home page with API documentation"""
-	html_content = """
-	<!DOCTYPE html>
-	<html>
-	<head>
-		<title>DocuFind AI API</title>
-		<style>
-			body { font-family: Arial, sans-serif; margin: 40px; }
-			.endpoint { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
-			code { background: #eee; padding: 2px 5px; }
-			.method { color: #007bff; font-weight: bold; }
-		</style>
-	</head>
-	<body>
-		<h1>🔍 DocuFind AI API</h1>
-		<p>Unified document and image search system</p>
-        
-		<h2>Available Endpoints:</h2>
-        
-		<div class="endpoint">
-			<span class="method">POST</span> <code>/upload/</code>
-			<p>Upload documents or images for processing</p>
-		</div>
-        
-		<div class="endpoint">
-			<span class="method">POST</span> <code>/search/</code>
-			<p>Search across all documents and images</p>
-		</div>
-        
-		<div class="endpoint">
-			<span class="method">GET</span> <code>/stats/</code>
-			<p>Get system statistics</p>
-		</div>
-        
-		<div class="endpoint">
-			<span class="method">GET</span> <code>/documents/</code>
-			<p>List all indexed documents</p>
-		</div>
-        
-		<h2>Quick Start:</h2>
-		<pre><code>curl -X POST "http://localhost:8000/search/" \\
-  -H "Content-Type: application/json" \\
-  -d '{"query": "hostel rules"}'</code></pre>
-        
-		<p>Check out the Streamlit UI at <a href="/ui">/ui</a></p>
-	</body>
-	</html>
-	"""
-	return HTMLResponse(content=html_content)
-
-@app.post("/upload/", response_model=UploadResponse)
-async def upload_file(file: UploadFile = File(...)):
-	"""Upload and process a file"""
-	try:
-		# Validate file
-		if not file_utils.is_supported_file(file.filename):
-			raise HTTPException(
-				status_code=400,
-				detail=f"Unsupported file type. Supported: PDF, DOC, TXT, Images"
-			)
-        
-		# Save uploaded file temporarily
-		temp_path = Path("temp_upload") / file.filename
-		temp_path.parent.mkdir(exist_ok=True)
-        
-		with open(temp_path, "wb") as buffer:
-			content = await file.read()
-			buffer.write(content)
-        
-		# Organize file to proper directory
-		organized_path = file_utils.organize_uploaded_file(str(temp_path))
-        
-		# Process file
-		result = processor.process_file(organized_path)
-        
-		# Add to vector store
-		if result["file_type"] == "image":
-			file_id = vector_store.add_image(result)
-		else:
-			file_id = vector_store.add_text_document(result)
-        
-		# Cleanup temp file
-		temp_path.unlink(missing_ok=True)
-        
-		return UploadResponse(
-			success=True,
-			message=f"File processed successfully",
-			file_id=file_id,
-			file_path=organized_path
-		)
-        
-	except Exception as e:
-		raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/search/", response_model=Dict[str, Any])
 async def search_documents(search_query: SearchQuery):
-	"""Search across all documents and images"""
+	"""Search across all documents and images with optional on-the-fly folder search.
+
+	Supports parallel processing and a simple folder cache to avoid recomputing embeddings.
+	"""
 	try:
-		query = search_query.query.lower().strip()
+		query = (search_query.query or "").strip()
+
 		# If a folder path is provided, perform on-the-fly semantic search
 		if search_query.path:
 			folder_path = search_query.path
 			from pathlib import Path
 			import numpy as np
+			from src.utils.folder_cache import FolderCache
 
-			# Validate selectable options
-			allowed_file_types = {"all", "pdf", "docx", "txt", "image", "pptx", "xlsx"}
-			allowed_doc_types = {"document", "image", "spreadsheet", "presentation"}
+			# Validate selectable options (as requested: file_type in [all, document, image])
+			allowed_file_types = {"all", "document", "image"}
 
 			ft = (search_query.file_type or "all").lower()
-			dt = (search_query.doc_type or "").lower() if hasattr(search_query, "doc_type") else ""
-
 			if ft not in allowed_file_types:
 				raise HTTPException(status_code=400, detail=f"Unsupported file_type: {ft}. Allowed: {sorted(list(allowed_file_types))}")
-			if dt and dt not in allowed_doc_types:
-				raise HTTPException(status_code=400, detail=f"Unsupported doc_type: {dt}. Allowed: {sorted(list(allowed_doc_types))}")
 
 			p = Path(folder_path)
 			if not p.exists() or not p.is_dir():
 				raise HTTPException(status_code=400, detail=f"Path does not exist or is not a directory: {folder_path}")
 
 			# Gather supported files from folder (non-recursive)
-			files = FileUtils.get_all_files(p)
+			supported = set([ext.lower() for ext in SUPPORTED_TEXT_EXTENSIONS + SUPPORTED_IMAGE_EXTENSIONS])
+			files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in supported]
 
-			# Helper: infer doc_type from extension
-			def infer_doc_type(ext: str) -> str:
-				ext = ext.lower()
-				if ext in [".pdf", ".doc", ".docx", ".txt"]:
-					return "document"
-				if ext in SUPPORTED_IMAGE_EXTENSIONS:
-					return "image"
-				if ext in [".xls", ".xlsx"]:
-					return "spreadsheet"
-				if ext in [".ppt", ".pptx"]:
-					return "presentation"
-				return "document"
+			# Filter by requested file_type
+			def is_image_ext(ext: str) -> bool:
+				return ext.lower() in SUPPORTED_IMAGE_EXTENSIONS
 
-			# Filter files by requested file_type/doc_type
-			filtered_files = []
-			for f in files:
-				ext = f.suffix.lower()
-				inferred = infer_doc_type(ext)
-				# apply doc_type filter if provided
-				if dt:
-					if inferred != dt:
-						continue
-				# apply file_type filter
-				if ft != "all":
-					# ft may be an extension name (pdf, docx, txt, image)
-					if ft == "image":
-						if inferred != "image":
-							continue
-					else:
-						# expect e.g. 'pdf' -> '.pdf'
-						if ext != f".{ft}":
-							continue
+			if ft == "document":
+				files = [f for f in files if not is_image_ext(f.suffix.lower())]
+			elif ft == "image":
+				files = [f for f in files if is_image_ext(f.suffix.lower())]
 
-				filtered_files.append(f)
-
-			if not filtered_files:
+			if not files:
 				return {"query": query, "results": [], "count": 0, "source": "folder"}
 
-			# Prepare processors
-			from src.processors.pdf_processor import PDFProcessor
-			pdf_proc = PDFProcessor()
+			cache = FolderCache()
+			cache_data = cache.load(str(p))
+			items = None
 
-			chunks = []  # each: {file, text, embedding}
-			failures = []
+			if cache_data:
+				# load cached items and convert embeddings to numpy arrays
+				items = cache_data.get("items", [])
+				for it in items:
+					it["embedding"] = np.array(it["embedding"], dtype=float)
 
-			for f in filtered_files:
-				try:
-					result = processor.process_file(str(f))
-					file_name = f.name
-					inferred = infer_doc_type(f.suffix.lower())
+			if items is None:
+				# extract and embed in parallel
+				items = []
+				failures = []
 
-					# If image, get image embedding and description/ocr
-					if inferred == "image":
-						# image embedding (CLIP)
-						image_embedding = None
-						if "embedding" in result and result["embedding"]:
-							image_embedding = np.array(result["embedding"])
+				# Step 1: extract content concurrently
+				def extract_worker(fp: Path):
+					try:
+						res = processor.process_file(str(fp))
+						return (fp.name, res, None)
+					except Exception as e:
+						return (str(fp.name), None, str(e))
+
+				max_workers = min(8, (os.cpu_count() or 2) * 2)
+				extracted = []
+				with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+					futures = {ex.submit(extract_worker, f): f for f in files}
+					for fut in concurrent.futures.as_completed(futures):
+						fn, res, err = fut.result()
+						if err:
+							failures.append({"file": fn, "error": err})
 						else:
-							# try to generate via image processor
-							image_embedding = processor.image_processor.get_image_embedding(str(f))
+							extracted.append((fn, res))
 
-						# store as a single chunk per image with descriptive text
-						desc = result.get("description", "") or result.get("ocr_text", "") or ""
-						chunks.append({"file": file_name, "text": desc, "embedding": image_embedding, "is_image": True})
+				# Step 2: separate text chunks and image embeddings
+				text_chunks = []  # (file, text)
+				image_tasks = []  # (file, fp)
+
+				for fn, res in extracted:
+					# infer image vs text
+					if res.get("file_type") == "image":
+						# try to get image embedding if provided, otherwise schedule generation
+						emb = res.get("embedding")
+						desc = res.get("description") or res.get("ocr_text") or ""
+						if emb is not None:
+							items.append({"file": fn, "text": desc, "embedding": np.array(emb, dtype=float), "is_image": True})
+						else:
+							# schedule image embedding generation via image processor
+							image_tasks.append((fn, res))
 						continue
 
-					# For documents, get chunks
-					if "chunks" in result and result["chunks"]:
-						file_chunks = result["chunks"]
+					# documents
+					chunks = res.get("chunks") or []
+					if not chunks:
+						txt = res.get("text") or ""
+						if txt:
+							text_chunks.append((fn, txt))
 					else:
-						text = result.get("text", "")
-						file_chunks = pdf_proc.chunk_text(text)
+						for ch in chunks:
+							chunk_text = ch["text"] if isinstance(ch, dict) else str(ch)
+							text_chunks.append((fn, chunk_text))
 
-					for ch in file_chunks:
-						chunk_text = ch["text"] if isinstance(ch, dict) else str(ch)
-						emb = vector_store.embedding_model.encode(chunk_text)
-						chunks.append({"file": file_name, "text": chunk_text, "embedding": np.array(emb), "is_image": False})
+				# Step 3: embed all text chunks in batches using the lightweight model
+				if text_chunks:
+					texts = [t for (_, t) in text_chunks]
+					# encode in batches (convert_to_numpy ensures numpy output)
+					try:
+						embeddings = vector_store.embedding_model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+					except TypeError:
+						embeddings = vector_store.embedding_model.encode(texts)
 
-				except Exception as e:
-					failures.append({"file": str(f), "error": str(e)})
+					for (fn, _), emb in zip(text_chunks, embeddings):
+						items.append({"file": fn, "text": (_ or "")[:2000], "embedding": np.array(emb, dtype=float), "is_image": False})
 
-			if not chunks:
-				return {"query": query, "results": [], "count": 0, "failures": failures, "source": "folder"}
+				# Step 4: compute image embeddings (if any) in parallel
+				if image_tasks:
+					def image_worker(pair):
+						fn, res = pair
+						try:
+							# if processor exposes image_processor
+							emb = None
+							if "path" in res:
+								# if res contains a path
+								emb = processor.image_processor.get_image_embedding(res.get("path"))
+							if emb is None and res.get("id"):
+								emb = processor.image_processor.get_image_embedding(res.get("id"))
+							# as fallback try to use description vectorization
+							desc = res.get("description") or res.get("ocr_text") or ""
+							return (fn, desc, emb, None)
+						except Exception as e:
+							return (fn, "", None, str(e))
 
-			# Compute query embedding and similarity
-			# If there are image chunks and no text chunks, use CLIP text encoder; otherwise use sentence-transformers for text
-			has_image_chunks = any(c.get("is_image") for c in chunks)
-			has_text_chunks = any(not c.get("is_image") for c in chunks)
+					with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+						futures = [ex.submit(image_worker, t) for t in image_tasks]
+						for fut in concurrent.futures.as_completed(futures):
+							fn, desc, emb, err = fut.result()
+							if err:
+								failures.append({"file": fn, "error": err})
+							else:
+								if emb is not None:
+									items.append({"file": fn, "text": (desc or "")[:2000], "embedding": np.array(emb, dtype=float), "is_image": True})
+								else:
+									# if no emb, attempt to encode desc with text model
+									if desc:
+										try:
+											embt = vector_store.embedding_model.encode(desc)
+											items.append({"file": fn, "text": (desc or "")[:2000], "embedding": np.array(embt, dtype=float), "is_image": False})
+										except Exception:
+											failures.append({"file": fn, "error": "no embedding available"})
 
-			results_out = []
+				# Save cache (serialize embeddings to lists)
+				to_cache = []
+				for it in items:
+					to_cache.append({"file": it["file"], "text": it.get("text", ""), "embedding": list(it["embedding"].astype(float)), "is_image": bool(it.get("is_image", False))})
+				cache.save(str(p), to_cache)
 
-			if has_image_chunks and not has_text_chunks:
-				# Use CLIP text encoder for queries
+			# At this point 'items' is a list of dicts with numpy embeddings
+			if not items:
+				return {"query": query, "results": [], "count": 0, "source": "folder"}
+
+			# Build modality-specific lists
+			text_items = [it for it in items if not it.get("is_image")]
+			image_items = [it for it in items if it.get("is_image")]
+
+			results_accum = []
+
+			# Helper similarity
+			def cosine(a, b):
+				an = np.linalg.norm(a)
+				bn = np.linalg.norm(b)
+				if an == 0 or bn == 0:
+					return 0.0
+				return float(np.dot(a, b) / (an * bn))
+
+			# If searching images only
+			if ft == "image":
+				if not image_items:
+					return {"query": query, "results": [], "count": 0, "source": "folder"}
+				# produce CLIP text embedding for query
 				try:
 					import clip
 					import torch
@@ -293,44 +260,77 @@ async def search_documents(search_query: SearchQuery):
 					with torch.no_grad():
 						text_feat = img_proc.model.encode_text(tokenized)
 					qv = text_feat.cpu().numpy()[0]
-					qnorm = np.linalg.norm(qv)
+				except Exception:
+					# fallback to text model for queries
+					qv = np.array(vector_store.embedding_model.encode(query))
 
-					for c in chunks:
-						ev = np.array(c["embedding"])
-						denom = (np.linalg.norm(ev) * qnorm)
-						score = float(np.dot(qv, ev) / denom) if denom != 0 else 0.0
-						results_out.append({"file": c["file"], "text": (c.get("text") or "")[:500], "score": score})
+				for it in image_items:
+					score = cosine(qv, np.array(it["embedding"]))
+					results_accum.append({"file": it["file"], "text": it.get("text", "")[:500], "score": score})
 
-				except Exception as e:
-					raise HTTPException(status_code=500, detail=f"CLIP encoding failed: {e}")
-
-			else:
-				# Use sentence-transformers embedding for query
+			elif ft == "document":
+				if not text_items:
+					return {"query": query, "results": [], "count": 0, "source": "folder"}
 				qv = np.array(vector_store.embedding_model.encode(query))
-				qnorm = np.linalg.norm(qv)
+				for it in text_items:
+					score = cosine(qv, np.array(it["embedding"]))
+					results_accum.append({"file": it["file"], "text": it.get("text", "")[:500], "score": score})
 
-				for c in chunks:
-					ev = np.array(c["embedding"])
-					denom = (np.linalg.norm(ev) * qnorm)
-					score = float(np.dot(qv, ev) / denom) if denom != 0 else 0.0
-					results_out.append({"file": c["file"], "text": (c.get("text") or "")[:500], "score": score})
+			else:  # all: search both modalities and normalize across each modality
+				# Text side
+				text_results = []
+				if text_items:
+					qv_text = np.array(vector_store.embedding_model.encode(query))
+					for it in text_items:
+						s = cosine(qv_text, np.array(it["embedding"]))
+						text_results.append({"file": it["file"], "text": it.get("text", "")[:500], "raw_score": s, "mod": "text"})
+				# Image side
+				image_results = []
+				if image_items:
+					try:
+						import clip
+						import torch
+						img_proc = processor.image_processor
+						tokenized = clip.tokenize([query]).to(img_proc.device)
+						with torch.no_grad():
+							text_feat = img_proc.model.encode_text(tokenized)
+						qv_img = text_feat.cpu().numpy()[0]
+					except Exception:
+						qv_img = np.array(vector_store.embedding_model.encode(query))
+
+					for it in image_items:
+						s = cosine(qv_img, np.array(it["embedding"]))
+						image_results.append({"file": it["file"], "text": it.get("text", "")[:500], "raw_score": s, "mod": "image"})
+
+				# Normalize per-modality
+				combined = []
+				if text_results:
+					max_t = max(r["raw_score"] for r in text_results) or 1.0
+					for r in text_results:
+						r["score"] = r["raw_score"] / max_t
+						combined.append({"file": r["file"], "text": r["text"], "score": r["score"]})
+				if image_results:
+					max_i = max(r["raw_score"] for r in image_results) or 1.0
+					for r in image_results:
+						r["score"] = r["raw_score"] / max_i
+						combined.append({"file": r["file"], "text": r["text"], "score": r["score"]})
+
+				results_accum = combined
 
 			# Sort, dedupe by file keeping best score per file, and return top-N
-			results_out = sorted(results_out, key=lambda x: x["score"], reverse=True)
-			seen = {}
+			results_accum = sorted(results_accum, key=lambda x: x["score"], reverse=True)
+			seen = set()
 			deduped = []
-			for r in results_out:
+			for r in results_accum:
 				if r["file"] not in seen:
-					seen[r["file"]] = True
+					seen.add(r["file"])
 					deduped.append(r)
-			top_n = deduped[: search_query.limit]
 
+			top_n = deduped[: max(1, int(search_query.limit or 10))]
 			response = {"query": query, "results": top_n, "count": len(top_n), "source": "folder"}
-			if failures:
-				response["failures"] = failures
 			return response
-        
-		# Perform search based on file type
+
+		# Fallback to existing indexed searches
 		if search_query.file_type == "text":
 			results = vector_store.search_text(query, n_results=search_query.limit)
 			return {
@@ -348,10 +348,11 @@ async def search_documents(search_query: SearchQuery):
 				"count": len(results)
 			}
 		else:
-			# Hybrid search
-			hybrid_results = vector_store.hybrid_search(query, n_results=search_query.limit//2)
+			hybrid_results = vector_store.hybrid_search(query, n_results=max(1, int(search_query.limit // 2)))
 			return hybrid_results
-            
+
+	except HTTPException:
+		raise
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=str(e))
 

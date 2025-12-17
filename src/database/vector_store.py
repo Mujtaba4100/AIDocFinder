@@ -6,6 +6,11 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 from datetime import datetime
 import json
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.utils.config import (
     CHROMA_PERSIST_DIR,

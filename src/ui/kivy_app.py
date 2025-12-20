@@ -1,470 +1,513 @@
+"""KivyMD UI for DocuFindAI (Desktop-first, Android-safe).
+
+Backend (FastAPI) is assumed to be already running.
+
+Critical behavior implemented here:
+- Folder selection is REQUIRED before searching.
+- Search requests are ALWAYS folder-scoped (send `path` to the backend).
+- Recent folders (last 10) persist to a JSON file under `App.user_data_dir`.
+- UI stays responsive: HTTP calls run in a background thread.
+
+NOTE: This module intentionally does NOT import or initialize ML / VectorStore.
+All searching is done via HTTP against the backend.
 """
-KivyMD UI for DocuFindAI
 
-Cross-platform app (Desktop + Android) that calls the backend VectorStore.
+from __future__ import annotations
 
-Usage: run this module with the virtualenv active. On desktop the app will
-try to open a native folder picker; on Android paste a path or use SAF if
-available via plyer/filechooser.
+import json
+import os
+import threading
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-This file integrates with the existing backend: it will attempt to call
-`VectorStore.hybrid_search(query, n_results, path=...)` when available;
-otherwise it will POST to the local API at `http://localhost:8000/search/`.
-
-Requires: Kivy, KivyMD, requests, plyer (optional), and the project packages
-to be importable (this script adds the project root to sys.path).
-
-"""
 from kivy.clock import Clock
-from kivy.core.clipboard import Clipboard
 from kivy.lang import Builder
 from kivy.metrics import dp
-from kivy.properties import StringProperty, BooleanProperty
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.image import AsyncImage
+from kivy.properties import BooleanProperty, ListProperty, NumericProperty, StringProperty
 from kivy.utils import platform
 
 from kivymd.app import MDApp
-from kivymd.uix.button import MDRaisedButton, MDIconButton
-from kivymd.uix.label import MDLabel
-from kivymd.uix.card import MDCard
-from kivymd.uix.list import MDList, OneLineAvatarIconListItem, ImageLeftWidget, OneLineListItem
+from kivymd.uix.button import MDRaisedButton
 from kivymd.uix.dialog import MDDialog
-from kivymd.uix.textfield import MDTextField
-from kivymd.uix.spinner import MDSpinner
+from kivymd.uix.filemanager import MDFileManager
 from kivymd.uix.menu import MDDropdownMenu
-
-import threading
-import os
-import sys
-import inspect
-import json
-
-# Ensure project `src` is importable
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-from src.database.vector_store import VectorStore
 
 try:
     import requests
-except Exception:
+except Exception:  # pragma: no cover
     requests = None
 
-try:
-    from plyer import filechooser
-except Exception:
-    filechooser = None
+
+API_BASE = os.environ.get("DOCUFIND_API_BASE", "http://localhost:8000").rstrip("/")
 
 
-KV = '''
+KV = r'''
+<ResultRow>:
+    # Using a button as the row makes desktop clicks simple.
+    text: root.row_title
+    # Ensure result text is readable against theme background
+    text_color: app.theme_cls.text_color
+    md_bg_color: app.theme_cls.bg_normal
+    size_hint_y: None
+    height: dp(72)
+    halign: "left"
+    on_release: app.open_result(root.full_path)
+
 BoxLayout:
     orientation: 'vertical'
     padding: dp(12)
-    spacing: dp(12)
+    spacing: dp(10)
 
-    MDLabel:
-        text: 'DocuFindAI'
-        halign: 'center'
-        font_style: 'H4'
+    MDTopAppBar:
+        title: 'DocuFindAI'
+        elevation: 2
 
-    # Search query
-    MDTextField:
-        id: query_input
-        hint_text: 'Search query'
-        helper_text_mode: 'on_focus'
-        size_hint_y: None
-        height: dp(48)
-
-    # Folder path + Browse
-    BoxLayout:
-        size_hint_y: None
-        height: dp(48)
+    MDCard:
+        orientation: 'vertical'
+        padding: dp(12)
         spacing: dp(8)
-
-        MDTextField:
-            id: paste_path
-            hint_text: 'Paste folder path (or use Browse)'
-            size_hint_x: 0.9
-
-        MDIconButton:
-            id: browse_button
-            icon: 'folder-search'
-            on_release: app.open_folder_picker()
-
-    # Filters
-    BoxLayout:
         size_hint_y: None
-        height: dp(48)
-        spacing: dp(8)
+        height: dp(140)
 
-        MDTextField:
-            id: limit_input
-            hint_text: 'Limit (results)'
-            text: '10'
-            size_hint_x: 0.2
-            input_filter: 'int'
+        MDLabel:
+            text: 'Folder Selection'
+            font_style: 'Subtitle1'
+            size_hint_y: None
+            height: self.texture_size[1]
 
-        MDTextField:
-            id: content_type_input
-            hint_text: 'Content type (all, document, image)'
-            text: 'all'
-            size_hint_x: 0.3
-            readonly: True
-            on_focus: if self.focus: app.open_content_type_menu(self)
+        MDLabel:
+            id: folder_label
+            text: 'Selected Folder: ' + (app.selected_folder if app.selected_folder else 'None')
+            theme_text_color: 'Hint'
+            size_hint_y: None
+            height: self.texture_size[1]
 
-        MDRaisedButton:
-            id: search_btn
+        BoxLayout:
+            size_hint_y: None
+            height: dp(44)
+            spacing: dp(8)
+
+            MDRaisedButton:
+                id: browse_btn
+                text: 'Browse Folder'
+                on_release: app.open_folder_picker()
+
+            MDRaisedButton:
+                id: recent_btn
+                text: 'Recent Folders'
+                disabled: False if app.recent_paths else True
+                on_release: app.open_recent_menu()
+
+    MDCard:
+        orientation: 'vertical'
+        padding: dp(12)
+        spacing: dp(10)
+        size_hint_y: None
+        height: dp(150)
+
+        MDLabel:
             text: 'Search'
-            size_hint_x: 0.2
-            on_release: app.on_search_clicked()
+            font_style: 'Subtitle1'
+            size_hint_y: None
+            height: self.texture_size[1]
 
-        MDRaisedButton:
-            id: recent_btn
-            text: 'Recent Paths'
-            size_hint_x: 0.2
-            on_release: app.show_recent_paths()
+        MDTextField:
+            id: query_input
+            hint_text: 'Enter search query'
+            helper_text: 'Search runs ONLY inside the selected folder'
+            helper_text_mode: 'persistent'
+            on_text: app.on_query_changed(self.text)
 
-        MDSpinner:
-            id: spinner
-            size_hint: None, None
-            size: dp(36), dp(36)
-            active: False
+        BoxLayout:
+            size_hint_y: None
+            height: dp(44)
+            spacing: dp(8)
+
+            MDTextField:
+                id: file_type_input
+                hint_text: 'Type'
+                text: app.file_type
+                readonly: True
+                on_focus: if self.focus: app.open_file_type_menu(self)
+                size_hint_x: 0.35
+
+            MDTextField:
+                id: limit_input
+                hint_text: 'Limit'
+                text: '10'
+                input_filter: 'int'
+                size_hint_x: 0.25
+
+            MDRaisedButton:
+                id: search_btn
+                text: 'Search'
+                disabled: (not app.folder_selected) or (not app.query_ready) or app.loading
+                on_release: app.on_search_clicked()
+
+            MDSpinner:
+                id: spinner
+                size_hint: None, None
+                size: dp(32), dp(32)
+                active: app.loading
 
     MDLabel:
         id: status_label
-        text: ''
-        halign: 'left'
+        text: app.status_text
         theme_text_color: 'Hint'
+        size_hint_y: None
+        height: self.texture_size[1]
 
-    ScrollView:
-        MDList:
-            id: results_list
+    MDLabel:
+        text: 'Results'
+        font_style: 'Subtitle1'
+        size_hint_y: None
+        height: self.texture_size[1]
 
+    RecycleView:
+        id: results_rv
+        viewclass: 'ResultRow'
+        bar_width: dp(8)
+        scroll_type: ['bars', 'content']
+        RecycleBoxLayout:
+            default_size: None, dp(72)
+            default_size_hint: 1, None
+            size_hint_y: None
+            height: self.minimum_height
+            orientation: 'vertical'
+            spacing: dp(8)
 '''
 
 
-class ResultItem(OneLineAvatarIconListItem):
-    """List item that optionally shows an image on the left."""
-
-    def __init__(self, filename: str, snippet: str, score: float, thumbnail: str = None, **kwargs):
-        super().__init__(text=f"{filename} — {score:.3f}", **kwargs)
-        # Clicking copies snippet to clipboard
-        self.filename = filename
-        self.snippet = snippet
-        if thumbnail:
-            img = ImageLeftWidget()
-            img.add_widget(AsyncImage(source=thumbnail))
-            self.add_widget(img)
-
-    def on_release(self):
-        # copy snippet to clipboard
-        if self.snippet:
-            Clipboard.copy(self.snippet)
+class ResultRow(MDRaisedButton):
+    row_title = StringProperty("")
+    full_path = StringProperty("")
 
 
 class DocuFindApp(MDApp):
-    file_type_options = ['all', 'document', 'image']
+    """Desktop-first KivyMD client for DocuFindAI backend."""
+
+    selected_folder = StringProperty("")
+    folder_selected = BooleanProperty(False)
+    query_ready = BooleanProperty(False)
+    loading = BooleanProperty(False)
+    status_text = StringProperty("")
+
+    file_type = StringProperty("all")
+    file_type_options = ["all", "document", "image"]
+
+    recent_paths = ListProperty([])
+    results = ListProperty([])
 
     def build(self):
-        self.title = 'DocuFindAI'
-        self.theme_cls.primary_palette = 'Blue'
+        self.title = "DocuFindAI"
+        self.theme_cls.primary_palette = "Blue"
         self.root = Builder.load_string(KV)
 
-        # Create VectorStore client instance (local direct integration)
-        try:
-            self.vs = VectorStore()
-        except Exception as e:
-            print('Warning: VectorStore init failed, will use API fallback:', e)
-            self.vs = None
+        self._dialog: Optional[MDDialog] = None
+        self._file_type_menu: Optional[MDDropdownMenu] = None
+        self._recent_menu: Optional[MDDropdownMenu] = None
 
-        # menu for content_type: use OneLineListItem viewclass
-        menu_items = []
-        for t in self.file_type_options:
-            menu_items.append({
-                "text": t,
-                "viewclass": "OneLineListItem",
-                "height": dp(48),
-                "on_release": lambda x=t: self.set_content_type(x),
-            })
-        # set caller so menu can be positioned relative to the input
-        self.content_menu = MDDropdownMenu(caller=self.root.ids.content_type_input, items=menu_items, width_mult=3)
-
-        # Load recent paths
         self.recent_paths = self._load_recent_paths()
+        self._init_file_type_menu()
+        self._refresh_recent_menu()
+        self._set_status(f"Backend: {API_BASE}")
 
+        # Native folder picker on desktop; Android-safe fallback will be shown if needed.
+        self._file_manager: Optional[MDFileManager] = None
         return self.root
 
-    def set_content_type(self, v):
-        self.root.ids.content_type_input.text = v
-        self.content_menu.dismiss()
+    # ---------------------------
+    # UI helpers
+    # ---------------------------
+    def _set_status(self, text: str) -> None:
+        self.status_text = text or ""
 
-    def open_content_type_menu(self, caller):
-        self.content_menu.caller = caller
-        self.content_menu.open()
-
-    def open_folder_picker(self):
-        """Open folder picker. On platforms without folder picker, user can paste path."""
-        # Prefer folder selection. On Android filechooser may return file paths; use dirname.
-        if filechooser:
+    def _show_error(self, text: str) -> None:
+        if self._dialog:
             try:
-                filechooser.open_file(on_selection=self._on_folder_selected)
-                return
+                self._dialog.dismiss()
             except Exception:
                 pass
+        self._dialog = MDDialog(title="DocuFindAI", text=text, buttons=[MDRaisedButton(text="OK", on_release=lambda *_: self._dialog.dismiss())])
+        self._dialog.open()
 
-        # Desktop: tkinter askdirectory
+    def on_query_changed(self, text: str) -> None:
+        self.query_ready = bool((text or "").strip())
+
+    def _init_file_type_menu(self) -> None:
+        items = []
+        for t in self.file_type_options:
+            items.append(
+                {
+                    "text": t,
+                    "height": dp(48),
+                    "on_release": lambda x=t: self._set_file_type(x),
+                }
+            )
+        self._file_type_menu = MDDropdownMenu(items=items, width_mult=3)
+
+    def _set_file_type(self, value: str) -> None:
+        self.file_type = value
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            folder = filedialog.askdirectory()
-            if folder:
-                self.root.ids.paste_path.text = folder
-                return
+            self.root.ids.file_type_input.text = value
         except Exception:
             pass
+        if self._file_type_menu:
+            self._file_type_menu.dismiss()
 
-        self.root.ids.status_label.text = 'Folder picker not available; paste path manually.'
+    def open_file_type_menu(self, caller) -> None:
+        if not self._file_type_menu:
+            self._init_file_type_menu()
+        self._file_type_menu.caller = caller
+        self._file_type_menu.open()
 
-    def _on_folder_selected(self, selection):
-        if not selection:
-            return
-        path = selection[0] if isinstance(selection, (list, tuple)) else selection
-        # if a file path was returned, convert to directory
-        if os.path.isfile(path):
-            path = os.path.dirname(path)
-        self.root.ids.paste_path.text = path
+    # ---------------------------
+    # Folder selection
+    # ---------------------------
+    def open_folder_picker(self) -> None:
+        """Open a folder picker.
 
-    def show_recent_paths(self):
-        # show modal dialog with recent paths
-        if not self.recent_paths:
-            self.root.ids.status_label.text = 'No recent paths saved.'
-            return
-
-        content = MDList()
-        for p in self.recent_paths:
-            # validate existence
-            valid = os.path.exists(p)
-            item = OneLineListItem(text=p, on_release=lambda x, path=p: self._select_recent_path(path))
-            content.add_widget(item)
-
-        self._recent_dialog = MDDialog(title='Recent Paths', type='custom', content_cls=content, size_hint=(0.9, 0.7))
-        self._recent_dialog.open()
-
-    def _select_recent_path(self, path):
-        if os.path.exists(path):
-            self.root.ids.paste_path.text = path
+        Desktop (Windows/Linux/macOS): native folder chooser via tkinter.
+        Android-safe fallback: use KivyMD file manager in directory mode.
+        """
+        if platform in ("win", "linux", "macosx"):
             try:
-                self._recent_dialog.dismiss()
+                import tkinter as tk
+                from tkinter import filedialog
+
+                root = tk.Tk()
+                root.withdraw()
+                folder = filedialog.askdirectory()
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+                if folder:
+                    self.set_selected_folder(folder)
+                return
             except Exception:
+                # Fall through to file-manager-based selection.
                 pass
-        else:
-            self.root.ids.status_label.text = 'Selected path does not exist.'
 
-    def _save_recent_path(self, path: str):
-        if not path:
+        # Android-safe fallback (directory browsing)
+        if not self._file_manager:
+            self._file_manager = MDFileManager(
+                exit_manager=self._close_file_manager,
+                select_path=self._select_path_from_file_manager,
+                preview=False,
+                selector="folder",
+            )
+        start_path = self.selected_folder or str(Path.home())
+        self._file_manager.show(start_path)
+
+    def _close_file_manager(self, *args) -> None:
+        if self._file_manager:
+            self._file_manager.close()
+
+    def _select_path_from_file_manager(self, path: str) -> None:
+        self._close_file_manager()
+        self.set_selected_folder(path)
+
+    def set_selected_folder(self, folder: str) -> None:
+        folder = (folder or "").strip()
+        if not folder:
             return
-        if path in self.recent_paths:
-            self.recent_paths.remove(path)
-        self.recent_paths.insert(0, path)
-        self.recent_paths = self.recent_paths[:10]
-        try:
-            with open(os.path.join(ROOT, '.recent_paths.json'), 'w', encoding='utf-8') as f:
-                json.dump(self.recent_paths, f)
-        except Exception:
-            pass
+        p = Path(folder)
+        if not p.exists() or not p.is_dir():
+            self._show_error("Please choose a valid folder.")
+            return
 
-    def _load_recent_paths(self):
+        self.selected_folder = str(p)
+        self.folder_selected = True
+        self._save_recent_path(self.selected_folder)
+        self._refresh_recent_menu()
+        self._set_status("Ready")
+
+    # ---------------------------
+    # Recent folders
+    # ---------------------------
+    def _recent_paths_file(self) -> Path:
+        return Path(self.user_data_dir) / "recent_paths.json"
+
+    def _load_recent_paths(self) -> List[str]:
         try:
-            p = os.path.join(ROOT, '.recent_paths.json')
-            if os.path.exists(p):
-                with open(p, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+            fp = self._recent_paths_file()
+            if fp.exists():
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    # Keep only strings.
+                    return [str(x) for x in data if isinstance(x, str)]
         except Exception:
             pass
         return []
 
-    def on_search_clicked(self):
-        # Read inputs and validate
-        query = (self.root.ids.query_input.text or '').strip()
-        path = (self.root.ids.paste_path.text or '').strip()
-        content_type = (self.root.ids.content_type_input.text or 'all').strip()
+    def _save_recent_path(self, path: str) -> None:
+        if not path:
+            return
+        # Normalize + de-duplicate
+        path = str(Path(path))
+        current = [p for p in self.recent_paths if p != path]
+        current.insert(0, path)
+        self.recent_paths = current[:10]
+        try:
+            fp = self._recent_paths_file()
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(json.dumps(self.recent_paths, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            # Non-fatal
+            pass
+
+    def _refresh_recent_menu(self) -> None:
+        items = []
+        for p in self.recent_paths:
+            items.append(
+                {
+                    "text": p,
+                    "height": dp(48),
+                    "on_release": lambda x=p: self._select_recent_folder(x),
+                }
+            )
+        self._recent_menu = MDDropdownMenu(items=items, width_mult=6)
+
+    def open_recent_menu(self) -> None:
+        if not self.recent_paths:
+            self._show_error("No recent folders yet. Use 'Browse Folder' first.")
+            return
+        self._refresh_recent_menu()
+        self._recent_menu.caller = self.root.ids.recent_btn
+        self._recent_menu.open()
+
+    def _select_recent_folder(self, folder: str) -> None:
+        if self._recent_menu:
+            self._recent_menu.dismiss()
+        self.set_selected_folder(folder)
+
+    # ---------------------------
+    # Search (folder-scoped only)
+    # ---------------------------
+    def on_search_clicked(self) -> None:
+        query = (self.root.ids.query_input.text or "").strip()
+        if not self.folder_selected:
+            self._show_error("Please select a folder first.")
+            return
+        if not query:
+            self._show_error("Please enter a search query.")
+            return
+        if requests is None:
+            self._show_error("Python package 'requests' is not available. Install dependencies and try again.")
+            return
+
         try:
             limit = int(self.root.ids.limit_input.text or 10)
         except Exception:
             limit = 10
+        limit = max(1, min(50, limit))
 
-        if not query:
-            self.root.ids.status_label.text = 'Please enter a search query.'
-            return
+        self.loading = True
+        self.results = []
+        self.root.ids.results_rv.data = []
+        self._set_status("Searching...")
 
-        # Path optional but if provided ensure exists
-        if path and not os.path.exists(path):
-            self.root.ids.status_label.text = 'Invalid folder path.'
-            return
-
-        # show spinner, disable search button and clear results
-        self.root.ids.spinner.active = True
-        self.root.ids.status_label.text = 'Searching...'
-        self.root.ids.results_list.clear_widgets()
-        try:
-            self.root.ids.browse_button.disabled = True
-            self.root.ids.recent_btn.disabled = True
-            self.root.ids.search_btn.disabled = True
-        except Exception:
-            pass
-
-        # disable Search by setting the widget disabled via id (search button not named; reuse browse_button state to indicate running)
-        thread = threading.Thread(target=self._background_search, args=(query, path, content_type, limit), daemon=True)
+        thread = threading.Thread(
+            target=self._background_search,
+            args=(query, self.selected_folder, self.file_type, limit),
+            daemon=True,
+        )
         thread.start()
 
-    def _background_search(self, query, path, content_type, limit):
-        """Background thread to perform search while keeping UI responsive."""
+    def _background_search(self, query: str, folder: str, file_type: str, limit: int) -> None:
         try:
-            results = None
-
-
-            # If a path is provided -> force on-the-fly folder search (bypass ChromaDB)
-            if path:
-                # Prefer direct VectorStore call if it supports path parameter
-                if self.vs is not None:
-                    try:
-                        sig = inspect.signature(self.vs.hybrid_search)
-                        if 'path' in sig.parameters:
-                            # try to pass content_type if supported
-                            try:
-                                results = self.vs.hybrid_search(query, n_results=limit, path=path, content_type=content_type)
-                            except TypeError:
-                                results = self.vs.hybrid_search(query, n_results=limit, path=path)
-                        else:
-                            results = None
-                    except Exception:
-                        results = None
-
-                # Fallback to API call that supports on-the-fly folder search
-                if results is None and requests:
-                    try:
-                        payload = {
-                            'query': query,
-                            'content_type': content_type,
-                            'limit': limit,
-                            'path': path
-                        }
-                        resp = requests.post('http://localhost:8000/search/', json=payload, timeout=120)
-                        if resp.status_code == 200:
-                            results = resp.json()
-                        else:
-                            results = {'error': f'Server error: {resp.status_code}'}
-                    except Exception as e:
-                        results = {'error': str(e)}
-
+            payload = {
+                "query": query,
+                "file_type": file_type,
+                "limit": limit,
+                "path": folder,
+            }
+            resp = requests.post(f"{API_BASE}/search/", json=payload, timeout=180)
+            if resp.status_code != 200:
+                data: Dict[str, Any] = {"error": f"Server returned {resp.status_code}: {resp.text}"}
             else:
-                # No path: use indexed search (ChromaDB)
-                if self.vs is not None:
-                    try:
-                        results = self.vs.hybrid_search(query, n_results=limit)
-                    except Exception as e:
-                        results = {'error': str(e)}
-                elif requests:
-                    try:
-                        resp = requests.post('http://localhost:8000/search/', json={
-                            'query': query,
-                            'content_type': content_type,
-                            'limit': limit
-                        }, timeout=30)
-                        results = resp.json()
-                    except Exception as e:
-                        results = {'error': str(e)}
-
-            # If still none, try persistent hybrid search via local API or direct call
-            if results is None:
-                if self.vs is not None:
-                    try:
-                        results = self.vs.hybrid_search(query, n_results=limit)
-                    except Exception as e:
-                        results = {'error': str(e)}
-                elif requests:
-                    try:
-                        resp = requests.post('http://localhost:8000/search/', json={
-                            'query': query,
-                            'content_type': content_type,
-                            'limit': limit
-                        }, timeout=30)
-                        results = resp.json()
-                    except Exception as e:
-                        results = {'error': str(e)}
-
-            # Save recent path
-            if path:
-                self._save_recent_path(path)
-
-            # schedule UI update
-            Clock.schedule_once(lambda dt: self._display_results(results), 0)
-
+                data = resp.json()
+            Clock.schedule_once(lambda dt: self._display_results(data), 0)
         except Exception as e:
-            Clock.schedule_once(lambda dt: self._display_results({'error': str(e)}), 0)
+            err = str(e)
+            Clock.schedule_once(lambda dt, _err=err: self._display_results({"error": _err}), 0)
 
-    def _display_results(self, results):
-        # re-enable controls
-        try:
-            self.root.ids.browse_button.disabled = False
-            self.root.ids.recent_btn.disabled = False
-            self.root.ids.search_btn.disabled = False
-        except Exception:
-            pass
-
-        self.root.ids.spinner.active = False
-        rlabel = self.root.ids.status_label
+    def _display_results(self, results: Any) -> None:
+        self.loading = False
 
         if results is None:
-            rlabel.text = 'No results returned.'
+            self._set_status("No results returned.")
             return
 
-        if isinstance(results, dict) and results.get('error'):
-            rlabel.text = f"Error: {results.get('error')}"
+        if isinstance(results, dict) and results.get("error"):
+            self._set_status(f"Error: {results.get('error')}")
             return
 
-        # Normalize possible response shapes
-        items = []
-        if isinstance(results, dict) and 'results' in results:
-            items = results['results']
-        elif isinstance(results, dict) and 'text_results' in results and 'image_results' in results:
-            # combine hybrid_search dict
-            items = []
-            for t in results.get('text_results', []):
-                items.append({'file': t.get('id') or t.get('document') or t.get('filename','text'), 'text': t.get('document') or t.get('metadata',{}).get('filename',''), 'score': t.get('score', 0)})
-            for i in results.get('image_results', []):
-                items.append({'file': i.get('id'), 'text': i.get('description',''), 'score': i.get('score', 0)})
+        items: List[Dict[str, Any]] = []
+        if isinstance(results, dict) and isinstance(results.get("results"), list):
+            items = results["results"]
         elif isinstance(results, list):
             items = results
         else:
-            # unexpected shape
-            rlabel.text = 'Unexpected response shape from backend.'
+            self._set_status("Unexpected response from backend.")
             return
 
         if not items:
-            rlabel.text = 'No results found.'
+            self._set_status("No results found in selected folder.")
+            self.root.ids.results_rv.data = []
             return
 
-        rlabel.text = f'Returned {len(items)} results.'
-        list_widget = self.root.ids.results_list
-
+        folder = Path(self.selected_folder)
+        rv_data = []
         for it in items:
-            fname = it.get('file') or it.get('id') or 'unknown'
-            text = it.get('text') or it.get('document') or ''
-            score = it.get('score') or it.get('distance') or 0.0
-            thumb = None
-            # if metadata contains thumbnail or filepath, optionally set thumb
-            md = it.get('metadata') or {}
-            fp = md.get('filepath') or md.get('filename')
-            if fp and os.path.exists(fp) and fp.lower().endswith(('.png', '.jpg', '.jpeg')):
-                thumb = fp
+            name = str(it.get("file") or it.get("id") or "unknown")
+            score = it.get("score")
+            try:
+                score_val = float(score) if score is not None else 0.0
+            except Exception:
+                score_val = 0.0
 
-            item = ResultItem(filename=fname, snippet=text, score=float(score), thumbnail=thumb)
-            list_widget.add_widget(item)
+            # Backend folder-search returns file names; derive full path inside selected folder.
+            candidate = Path(name)
+            full_path = str(candidate) if candidate.is_absolute() else str(folder / name)
+            rel = full_path
+            try:
+                rel = str(Path(full_path).relative_to(folder))
+            except Exception:
+                pass
+
+            title = f"{name}  (score: {score_val:.3f})"
+            rv_data.append({"row_title": title, "full_path": full_path, "text": rel})
+
+        self.root.ids.results_rv.data = rv_data
+        self._set_status(f"Returned {len(rv_data)} results (folder-scoped).")
+
+    # ---------------------------
+    # Result click action
+    # ---------------------------
+    def open_result(self, full_path: str) -> None:
+        """Desktop-only: open a result file with the OS default handler."""
+        if not full_path:
+            return
+        if platform == "android":
+            # Android support comes later; avoid breaking the app now.
+            self._set_status("Open file is desktop-only for now.")
+            return
+
+        try:
+            p = Path(full_path)
+            if not p.exists():
+                self._show_error("File not found on disk. The backend returned a name that does not exist locally.")
+                return
+            if platform == "win":
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif platform == "macosx":
+                os.system(f'open "{p}"')
+            else:
+                os.system(f'xdg-open "{p}"')
+        except Exception as e:
+            self._show_error(f"Could not open file: {e}")
 
 
 if __name__ == '__main__':

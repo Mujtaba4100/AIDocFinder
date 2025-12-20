@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from .constants import SUPPORTED_DOC_EXTS, SUPPORTED_IMAGE_EXTS, SUPPORTED_TEXT_EXTS
+from .ocr import OcrEngine
+
+
+class TextExtractor:
+    def __init__(self, ocr: OcrEngine) -> None:
+        self.ocr = ocr
+
+    def extract(self, file_path: str | Path) -> str:
+        p = Path(file_path)
+        ext = p.suffix.lower()
+
+        if ext in SUPPORTED_TEXT_EXTS:
+            try:
+                return p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return ""
+
+        if ext == ".docx":
+            return self._extract_docx(p)
+
+        if ext == ".pdf":
+            return self._extract_pdf(p)
+
+        if ext in SUPPORTED_IMAGE_EXTS:
+            return self.ocr.image_to_text(p)
+
+        return ""
+
+    def _extract_docx(self, path: Path) -> str:
+        try:
+            import docx  # python-docx
+
+            document = docx.Document(str(path))
+            parts = [p.text for p in document.paragraphs if p.text]
+            return "\n".join(parts).strip()
+        except Exception:
+            return ""
+
+    def _extract_pdf(self, path: Path) -> str:
+        # First try text extraction.
+        text = self._extract_pdf_text(path)
+        if text and len(text.strip()) > 30:
+            return text
+
+        # Optional OCR fallback for scanned PDFs (requires PyMuPDF + OCR engine).
+        try:
+            import fitz  # PyMuPDF
+
+            if not self.ocr.available:
+                return text
+
+            doc = fitz.open(str(path))
+            lines = []
+            # Keep it bounded to avoid massive OCR time.
+            max_pages = min(5, doc.page_count)
+            for i in range(max_pages):
+                page = doc.load_page(i)
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img_bytes = pix.tobytes("png")
+                # write temp image next to db cache? Keep simple: use in-memory via PIL.
+                try:
+                    from PIL import Image
+                    import io
+
+                    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                    # RapidOCR expects a path; save to a temporary file.
+                    import tempfile
+
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tf:
+                        img.save(tf.name)
+                        lines.append(self.ocr.image_to_text(tf.name))
+                except Exception:
+                    continue
+            ocr_text = "\n".join([x for x in lines if x]).strip()
+            return ocr_text or text
+        except Exception:
+            return text
+
+    def _extract_pdf_text(self, path: Path) -> str:
+        # Prefer PyMuPDF when available.
+        try:
+            import fitz  # PyMuPDF
+
+            doc = fitz.open(str(path))
+            parts = []
+            for page in doc:
+                parts.append(page.get_text("text"))
+            return "\n".join(parts).strip()
+        except Exception:
+            pass
+
+        # Fallback to pypdf.
+        try:
+            from pypdf import PdfReader  # type: ignore
+
+            reader = PdfReader(str(path))
+            parts = []
+            for page in reader.pages:
+                parts.append(page.extract_text() or "")
+            return "\n".join(parts).strip()
+        except Exception:
+            return ""

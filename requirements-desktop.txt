@@ -1,0 +1,18 @@
+kivy
+kivymd
+pyinstaller
+
+numpy
+python-docx
+pillow
+PyMuPDF
+
+# OCR (ONNX-based, easier to bundle than system Tesseract)
+rapidocr-onnxruntime
+
+# Embeddings (ONNX-based)
+fastembed
+onnxruntime
+
+# Optional PDF fallback extractor
+pypdf

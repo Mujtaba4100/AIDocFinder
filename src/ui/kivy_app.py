@@ -4,7 +4,7 @@ Backend (FastAPI) is assumed to be already running.
 
 Critical behavior implemented here:
 - Folder selection is REQUIRED before searching.
-- Search requests are ALWAYS folder-scoped (send `path` to the backend).
+- Search requests are ALWAYS folder-scoped (send `path`to the backend).
 - Recent folders (last 10) persist to a JSON file under `App.user_data_dir`.
 - UI stays responsive: HTTP calls run in a background thread.
 
@@ -38,7 +38,7 @@ except Exception:  # pragma: no cover
     requests = None
 
 
-API_BASE = os.environ.get("DOCUFIND_API_BASE", "http://localhost:8000").rstrip("/")
+API_BASE = os.environ.get("DOCUFIND_API_BASE", "https://kstvx08j-8000.asse.devtunnels.ms/").rstrip("/")
 
 
 KV = r'''

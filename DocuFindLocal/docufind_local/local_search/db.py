@@ -3,7 +3,6 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
-from typing import Iterable, Optional
 
 
 SCHEMA_SQL = """
@@ -41,17 +40,17 @@ def open_db(db_path: str | Path) -> sqlite3.Connection:
 
 
 def _ensure_columns(con: sqlite3.Connection) -> None:
-  """Best-effort schema migration for existing DBs."""
-  try:
-    cols = {row[1] for row in con.execute("PRAGMA table_info(files)").fetchall()}
-    if "image_embedding" not in cols:
-      con.execute("ALTER TABLE files ADD COLUMN image_embedding BLOB")
-    if "image_embedding_dim" not in cols:
-      con.execute("ALTER TABLE files ADD COLUMN image_embedding_dim INTEGER")
-    con.commit()
-  except Exception:
-    # Non-fatal: app can still run; image search will just be unavailable.
-    pass
+    """Best-effort schema migration for existing DBs."""
+    try:
+        cols = {row[1] for row in con.execute("PRAGMA table_info(files)").fetchall()}
+        if "image_embedding" not in cols:
+            con.execute("ALTER TABLE files ADD COLUMN image_embedding BLOB")
+        if "image_embedding_dim" not in cols:
+            con.execute("ALTER TABLE files ADD COLUMN image_embedding_dim INTEGER")
+        con.commit()
+    except Exception:
+        # Non-fatal: app can still run; image search will just be unavailable.
+        pass
 
 
 def now_ts() -> int:

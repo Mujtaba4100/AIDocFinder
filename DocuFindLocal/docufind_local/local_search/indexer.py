@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -52,8 +51,7 @@ class LocalIndexer:
 
         con = open_db(self.db_path)
         try:
-            # Collect images needing updates so we can embed them in batches.
-            pending_images: list[tuple[Path, str, str, int, int]] = []  # (path, rel, ext, mtime, size)
+            pending_images: list[tuple[Path, str, str, int, int]] = []
 
             for file_path in self.iter_files(folder):
                 stats.scanned += 1
@@ -73,7 +71,6 @@ class LocalIndexer:
                         stats.skipped += 1
                         continue
 
-                    # Images are handled later in batch to speed up embedding.
                     if ext in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}:
                         pending_images.append((file_path, rel, ext, mtime, size))
                         continue
@@ -81,8 +78,7 @@ class LocalIndexer:
                     if progress:
                         progress(f"Processing: {rel}")
 
-                    text = self.extractor.extract(file_path)
-                    text = (text or "").strip()
+                    text = (self.extractor.extract(file_path) or "").strip()
                     if not text:
                         con.execute(
                             """
@@ -110,8 +106,7 @@ class LocalIndexer:
                     if not self.embedder.available:
                         raise RuntimeError(f"Embedding model unavailable: {self.embedder.init_error}")
 
-                    vec = self.embedder.embed_text(text)
-                    vec = np.asarray(vec, dtype=np.float32)
+                    vec = np.asarray(self.embedder.embed_text(text), dtype=np.float32)
                     con.execute(
                         """
                         INSERT INTO files(folder, path, rel_path, ext, mtime, size, extracted_text, embedding, embedding_dim, image_embedding, image_embedding_dim, updated_at)
@@ -129,18 +124,7 @@ class LocalIndexer:
                           image_embedding_dim=NULL,
                           updated_at=excluded.updated_at
                         """,
-                        (
-                            folder,
-                            str(file_path),
-                            rel,
-                            ext,
-                            mtime,
-                            size,
-                            text,
-                            vec.tobytes(),
-                            int(vec.shape[0]),
-                            now_ts(),
-                        ),
+                        (folder, str(file_path), rel, ext, mtime, size, text, vec.tobytes(), int(vec.shape[0]), now_ts()),
                     )
                     con.commit()
                     stats.indexed += 1
@@ -148,12 +132,10 @@ class LocalIndexer:
                     stats.failed += 1
                     continue
 
-            # Batch process images (OCR + CLIP image embeddings)
             if pending_images:
                 if progress:
                     progress(f"Embedding {len(pending_images)} images...")
 
-                # Compute image embeddings (CLIP) if available
                 clip_vecs: list[Optional[np.ndarray]] = []
                 if self.clip.available:
                     try:
@@ -167,9 +149,7 @@ class LocalIndexer:
                         if progress:
                             progress(f"Processing image: {rel}")
 
-                        # OCR text is optional; can help for screenshots/docs.
-                        text = self.extractor.extract(img_path)
-                        text = (text or "").strip()
+                        text = (self.extractor.extract(img_path) or "").strip()
 
                         text_blob = None
                         text_dim = None
@@ -203,27 +183,13 @@ class LocalIndexer:
                               image_embedding_dim=excluded.image_embedding_dim,
                               updated_at=excluded.updated_at
                             """,
-                            (
-                                folder,
-                                str(img_path),
-                                rel,
-                                ext,
-                                mtime,
-                                size,
-                                text,
-                                text_blob,
-                                text_dim,
-                                img_blob,
-                                img_dim,
-                                now_ts(),
-                            ),
+                            (folder, str(img_path), rel, ext, mtime, size, text, text_blob, text_dim, img_blob, img_dim, now_ts()),
                         )
                         con.commit()
                         stats.indexed += 1
                     except Exception:
                         stats.failed += 1
                         continue
-
         finally:
             con.close()
 

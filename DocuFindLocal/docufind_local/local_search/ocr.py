@@ -16,7 +16,6 @@ class OcrEngine:
         self._init_error: Optional[str] = None
 
         try:
-            # RapidOCR (ONNX Runtime) is generally easier to bundle than Tesseract.
             from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
             self._engine = RapidOCR()
@@ -36,11 +35,9 @@ class OcrEngine:
         if not self._engine:
             return ""
         try:
-            # RapidOCR returns (result, elapsed)
             result, _ = self._engine(str(image_path))
             if not result:
                 return ""
-            # result: list of [box, text, score]
             lines = []
             for item in result:
                 if not item or len(item) < 2:

@@ -32,14 +32,6 @@ class LocalSearcher:
         limit: int = 10,
         min_score: Optional[float] = 0.15,
     ) -> List[SearchResult]:
-        """Search locally across BOTH text embeddings and image embeddings.
-
-        - Text modality: query embedded with BGE (TextEmbedder) and compared to `embedding`.
-        - Image modality: query embedded with CLIP text encoder and compared to `image_embedding`.
-
-        Scores are normalized per-modality before merging.
-        """
-
         folder_norm = str(Path(folder).resolve())
 
         q_text: Optional[np.ndarray] = None
@@ -56,8 +48,7 @@ class LocalSearcher:
 
         if q_text is None and q_img is None:
             raise RuntimeError(
-                "No embedding backend available for search. "
-                "Install fastembed/onnxruntime for image search and fastembed or sentence-transformers for text search."
+                "No embedding backend available for search. Install fastembed/onnxruntime."
             )
 
         con = open_db(self.db_path)
@@ -78,7 +69,6 @@ class LocalSearcher:
         if not rows:
             return []
 
-        # Collect vectors by modality
         text_items: List[Tuple[str, str, np.ndarray]] = []
         img_items: List[Tuple[str, str, np.ndarray]] = []
 
@@ -99,7 +89,6 @@ class LocalSearcher:
 
         scores_by_path: Dict[str, SearchResult] = {}
 
-        # Text scores
         if text_items and q_text is not None:
             mat = np.vstack([v for (_, _, v) in text_items])
             scores = mat @ q_text
@@ -114,7 +103,6 @@ class LocalSearcher:
                 if prev is None or norm_s > prev.score:
                     scores_by_path[p] = SearchResult(path=p, rel_path=rel, score=norm_s, source="text")
 
-        # Image scores
         if img_items and q_img is not None:
             mat = np.vstack([v for (_, _, v) in img_items])
             scores = mat @ q_img

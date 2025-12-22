@@ -42,12 +42,10 @@ class TextExtractor:
             return ""
 
     def _extract_pdf(self, path: Path) -> str:
-        # First try text extraction.
         text = self._extract_pdf_text(path)
         if text and len(text.strip()) > 30:
             return text
 
-        # Optional OCR fallback for scanned PDFs (requires PyMuPDF + OCR engine).
         try:
             import fitz  # PyMuPDF
 
@@ -55,22 +53,18 @@ class TextExtractor:
                 return text
 
             doc = fitz.open(str(path))
-            lines = []
-            # Keep it bounded to avoid massive OCR time.
+            lines: list[str] = []
             max_pages = min(5, doc.page_count)
             for i in range(max_pages):
                 page = doc.load_page(i)
                 pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                 img_bytes = pix.tobytes("png")
-                # write temp image next to db cache? Keep simple: use in-memory via PIL.
                 try:
                     from PIL import Image
                     import io
-
-                    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                    # RapidOCR expects a path; save to a temporary file.
                     import tempfile
 
+                    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tf:
                         img.save(tf.name)
                         lines.append(self.ocr.image_to_text(tf.name))
@@ -82,7 +76,6 @@ class TextExtractor:
             return text
 
     def _extract_pdf_text(self, path: Path) -> str:
-        # Prefer PyMuPDF when available.
         try:
             import fitz  # PyMuPDF
 
@@ -94,7 +87,6 @@ class TextExtractor:
         except Exception:
             pass
 
-        # Fallback to pypdf.
         try:
             from pypdf import PdfReader  # type: ignore
 

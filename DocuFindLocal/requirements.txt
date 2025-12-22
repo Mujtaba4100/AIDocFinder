@@ -1,0 +1,10 @@
+kivy
+kivymd
+numpy
+pillow
+python-docx
+PyMuPDF
+pypdf
+fastembed
+onnxruntime
+rapidocr-onnxruntime

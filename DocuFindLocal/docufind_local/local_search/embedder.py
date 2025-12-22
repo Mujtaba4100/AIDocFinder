@@ -11,7 +11,6 @@ class TextEmbedder:
     """Embedding wrapper.
 
     Uses `fastembed` (ONNX) when available for better packaging vs torch.
-    Falls back to sentence-transformers if installed.
     """
 
     def __init__(self, cache_dir: str | Path, model_name: str = "BAAI/bge-small-en-v1.5") -> None:
@@ -20,10 +19,8 @@ class TextEmbedder:
         self.model_name = model_name
 
         self._fastembed = None
-        self._st_model = None
         self._init_error: Optional[str] = None
 
-        # Force cache locations to inside user_data_dir to keep things self-contained.
         os.environ.setdefault("FASTEMBED_CACHE_PATH", str(self.cache_dir))
 
         try:
@@ -34,19 +31,9 @@ class TextEmbedder:
             self._fastembed = None
             self._init_error = str(e)
 
-        if self._fastembed is None:
-            try:
-                from sentence_transformers import SentenceTransformer  # type: ignore
-
-                self._st_model = SentenceTransformer(model_name)
-                self._init_error = None
-            except Exception as e:
-                self._st_model = None
-                self._init_error = str(e)
-
     @property
     def available(self) -> bool:
-        return self._fastembed is not None or self._st_model is not None
+        return self._fastembed is not None
 
     @property
     def init_error(self) -> Optional[str]:
@@ -57,15 +44,11 @@ class TextEmbedder:
         if not text:
             return np.zeros((1,), dtype=np.float32)
 
-        if self._fastembed is not None:
-            vec = next(self._fastembed.embed([text]))
-            arr = np.asarray(vec, dtype=np.float32)
-        elif self._st_model is not None:
-            arr = np.asarray(self._st_model.encode(text), dtype=np.float32)
-        else:
-            raise RuntimeError("No embedding backend available")
+        if self._fastembed is None:
+            raise RuntimeError(f"No embedding backend available: {self._init_error}")
 
-        # Normalize for cosine similarity via dot product.
+        vec = next(self._fastembed.embed([text]))
+        arr = np.asarray(vec, dtype=np.float32)
         norm = float(np.linalg.norm(arr))
         if norm > 0:
             arr = arr / norm
@@ -73,12 +56,7 @@ class TextEmbedder:
 
 
 class ClipEmbedder:
-    """CLIP-like embedding wrapper for image search.
-
-    Uses fastembed ONNX models:
-    - Vision model for images
-    - Text model for query strings
-    """
+    """CLIP-like embedding wrapper for image search (fastembed ONNX models)."""
 
     def __init__(
         self,
@@ -90,9 +68,6 @@ class ClipEmbedder:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("FASTEMBED_CACHE_PATH", str(self.cache_dir))
 
-        self.vision_model_name = vision_model
-        self.text_model_name = text_model
-
         self._image = None
         self._text = None
         self._init_error: Optional[str] = None
@@ -100,8 +75,8 @@ class ClipEmbedder:
         try:
             from fastembed import ImageEmbedding, TextEmbedding  # type: ignore
 
-            self._image = ImageEmbedding(model_name=self.vision_model_name)
-            self._text = TextEmbedding(model_name=self.text_model_name)
+            self._image = ImageEmbedding(model_name=vision_model)
+            self._text = TextEmbedding(model_name=text_model)
         except Exception as e:
             self._image = None
             self._text = None

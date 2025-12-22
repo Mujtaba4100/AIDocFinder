@@ -9,13 +9,13 @@ This desktop client performs **100% local** indexing + search.
 ## Run (dev)
 
 ```powershell
-cd E:\Python\DocFinder\DocuFindAI
+cd E:\Python\DocFinder\DocuFindAI\DocuFindLocal
 python -m venv venv
 ./venv/Scripts/Activate.ps1
 
-pip install -r requirements-desktop.txt
+pip install -r requirements.txt
 
-python .\src\ui\kivy_local_app.py
+python .\main.py
 ```
 
 ## Usage
@@ -31,14 +31,12 @@ The local DB is stored in your Kivy user data directory:
 
 ## Build a single-file EXE (PyInstaller)
 
-From the UI folder:
-
 ```powershell
-cd E:\Python\DocFinder\DocuFindAI\src\ui
-pyinstaller --clean --onefile --noconsole --additional-hooks-dir=. kivy_local_app.py
+cd E:\Python\DocFinder\DocuFindAI\DocuFindLocal
+pyinstaller --clean --noconsole --onefile launcher.spec
 ```
 
-The exe will be created under `dist/DocuFindAI_Local.exe` (or similar).
+The exe will be created under `dist/DocuFindLocal.exe`.
 
 ### Optional: bundle embedding model cache
 
@@ -49,8 +47,8 @@ Fastembed models may download on first run. If you want to **pre-bundle** a mode
 3) Build using the provided spec:
 
 ```powershell
-cd E:\Python\DocFinder\DocuFindAI\src\ui
-pyinstaller --clean --noconsole --onefile kivy_local_app.spec
+cd E:\Python\DocFinder\DocuFindAI\DocuFindLocal
+pyinstaller --clean --noconsole --onefile launcher.spec
 ```
 
 At runtime, the exe will copy `fastembed_cache/` into the user cache dir if empty.

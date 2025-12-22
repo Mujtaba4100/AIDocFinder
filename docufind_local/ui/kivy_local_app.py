@@ -28,6 +28,18 @@ from kivymd.uix.button import MDRaisedButton
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.filemanager import MDFileManager
 
+# When running this file directly (python path/to/kivy_local_app.py),
+# ensure the repository root is on sys.path so the `docufind_local`
+# package can be imported. Running as a module (python -m ...) does
+# not need this.
+if __name__ == "__main__" and __package__ is None:
+    from pathlib import Path
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
 from docufind_local.local_search.indexer import LocalIndexer
 from docufind_local.local_search.searcher import LocalSearcher
 

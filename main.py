@@ -1,5 +1,12 @@
-def main():
-    print("DocuFindAI project entry point")
+from __future__ import annotations
 
-if __name__ == '__main__':
+
+def main() -> None:
+    # Single supported entrypoint for the local desktop app.
+    from docufind_local.ui.kivy_local_app import DocuFindLocalApp
+
+    DocuFindLocalApp().run()
+
+
+if __name__ == "__main__":
     main()

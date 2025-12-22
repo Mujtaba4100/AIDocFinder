@@ -1,59 +1,82 @@
 # DocuFindAI – Desktop Local Search (Windows)
 
-This desktop client performs **100% local** indexing + search.
+**DocuFindAI** is a fully **offline desktop client** for indexing and searching documents locally.  
+No files are sent over the internet — everything stays on your PC.
 
-- Raw files stay on your PC.
-- A local SQLite DB stores only extracted text + embeddings + metadata.
-- Searching is local (cosine similarity over cached embeddings).
+---
 
-## Run (dev)
+## Features
+
+- 100% local search and indexing
+- Raw files never leave your PC
+- Local SQLite database stores extracted text, embeddings, and metadata
+- Semantic search using cosine similarity over cached embeddings
+- Local OCR with **RapidOCR (ONNXRuntime)** — no system Tesseract required
+
+---
+
+## Run (Development Mode)
 
 ```powershell
 cd E:\Python\DocFinder\DocuFindAI\DocuFindLocal
 python -m venv venv
-./venv/Scripts/Activate.ps1
-
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
 python .\main.py
-```
+Usage
+Click Browse Folder and select the folder to index.
 
-## Usage
+Click Sync Folder to index new or changed files. Unchanged files are skipped automatically.
 
-1. Click **Browse Folder** and choose a folder.
-2. Click **Sync Folder** (indexes new/changed files; unchanged files are skipped).
-3. Enter a query and click **Search**.
-4. Click a result row to open the file (desktop).
+Enter a query and click Search.
 
-The local DB is stored in your Kivy user data directory:
-- `local_index.sqlite3`
-- `model_cache/`
+Click a result row to open the corresponding file.
 
-## Build a single-file EXE (PyInstaller)
+Local storage paths:
 
-```powershell
+local_index.sqlite3 — your search index and metadata
+
+fastembed_cache/ — downloaded embedding models
+
+These are stored in your Kivy user data directory by default.
+
+Build a Single-File EXE (PyInstaller)
+powershell
+Copy code
 cd E:\Python\DocFinder\DocuFindAI\DocuFindLocal
 pyinstaller --clean --noconsole --onefile launcher.spec
-```
+Output: dist/DocuFindLocal.exe
 
-The exe will be created under `dist/DocuFindLocal.exe`.
+Optional: Pre-Bundle Embedding Model Cache
+To avoid downloading models on first run:
 
-### Optional: bundle embedding model cache
+Run the app once (or use a small script) to download the model cache.
 
-Fastembed models may download on first run. If you want to **pre-bundle** a model cache:
+Copy the resulting cache directory into assets/fastembed_cache/.
 
-1) Run the app once (or write a small script that embeds a sample string) so the model downloads into the cache.
-2) Copy the resulting cache directory into `assets/fastembed_cache/`.
-3) Build using the provided spec:
+Build the EXE using the spec file:
 
-```powershell
+powershell
+Copy code
 cd E:\Python\DocFinder\DocuFindAI\DocuFindLocal
 pyinstaller --clean --noconsole --onefile launcher.spec
-```
+At runtime, the EXE will copy fastembed_cache/ into the user cache directory if it’s empty.
 
-At runtime, the exe will copy `fastembed_cache/` into the user cache dir if empty.
+Notes / Tips
+Large folders may take longer to sync; indexing runs in a background thread.
 
-## Notes
+EXE distribution is fully offline — no internet connection required.
 
-- OCR uses **RapidOCR (ONNXRuntime)** by default. This avoids requiring a system Tesseract install.
-- If the folder is large, Sync can take time; it runs in a background thread.
+Recommended: use ZIP folder build for faster startup if distributing via Downloads.
+
+Downloads (GitHub Release / Google Drive)
+DocuFindLocal.exe → Single-file executable
+
+DocuFindLocal.zip → Folder-based build (recommended)
+
+pgsql
+Copy code
+
+This is **fully polished**, clickable, and ready for users to follow and download.  
+
+If you want, I can also **make an even shorter “Quick Start” version** for GitHub front page so users can get running in 1–2 minutes. Do you want me to do that?

@@ -31,6 +31,7 @@ class LocalSearcher:
         query: str,
         limit: int = 10,
         min_score: Optional[float] = 0.15,
+        file_types: Optional[set[str]] = None,
     ) -> List[SearchResult]:
         folder_norm = str(Path(folder).resolve())
 
@@ -53,15 +54,21 @@ class LocalSearcher:
 
         con = open_db(self.db_path)
         try:
+            where_clause = "WHERE folder = ?"
+            params = [folder_norm]
+            if file_types:
+                placeholders = ','.join('?' * len(file_types))
+                where_clause += f" AND ext IN ({placeholders})"
+                params.extend(file_types)
             rows = con.execute(
-                """
+                f"""
                 SELECT path, rel_path,
                        embedding, embedding_dim,
                        image_embedding, image_embedding_dim
                 FROM files
-                WHERE folder = ?
+                {where_clause}
                 """,
-                (folder_norm,),
+                params,
             ).fetchall()
         finally:
             con.close()

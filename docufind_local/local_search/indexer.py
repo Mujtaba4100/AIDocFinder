@@ -34,15 +34,19 @@ class LocalIndexer:
         self.embedder = TextEmbedder(cache_dir=self.cache_dir)
         self.clip = ClipEmbedder(cache_dir=self.cache_dir)
 
-    def iter_files(self, folder: str | Path) -> Iterable[Path]:
+    def iter_files(self, folder: str | Path, recursive: bool = True, file_types: Optional[set[str]] = None) -> Iterable[Path]:
         root = Path(folder)
-        for p in root.rglob("*"):
+        pattern = "**/*" if recursive else "*"
+        for p in root.glob(pattern):
             if not p.is_file():
                 continue
-            if p.suffix.lower() in SUPPORTED_EXTS:
+            ext = p.suffix.lower()
+            if file_types and ext not in file_types:
+                continue
+            if ext in SUPPORTED_EXTS:
                 yield p
 
-    def index_folder(self, folder: str | Path, progress: Optional[ProgressCb] = None) -> IndexStats:
+    def index_folder(self, folder: str | Path, progress: Optional[ProgressCb] = None, recursive: bool = True, file_types: Optional[set[str]] = None) -> IndexStats:
         folder = str(Path(folder).resolve())
         stats = IndexStats()
 
@@ -53,7 +57,7 @@ class LocalIndexer:
         try:
             pending_images: list[tuple[Path, str, str, int, int]] = []
 
-            for file_path in self.iter_files(folder):
+            for file_path in self.iter_files(folder, recursive=recursive, file_types=file_types):
                 stats.scanned += 1
                 try:
                     rel = safe_relpath(file_path, folder)

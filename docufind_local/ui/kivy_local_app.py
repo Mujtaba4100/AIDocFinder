@@ -45,7 +45,7 @@ KV = r'''
 <ResultRow>:
     orientation: 'vertical'
     size_hint_y: None
-    height: dp(100)
+    height: dp(120)
     padding: dp(12), dp(8)
     spacing: dp(4)
     md_bg_color: app.theme_cls.bg_light
@@ -75,12 +75,21 @@ KV = r'''
         size_hint_y: None
         height: self.texture_size[1]
 
-    MDRaisedButton:
-        text: 'Open File'
-        size_hint: None, None
-        size: dp(100), dp(36)
-        pos_hint: {'center_x': 0.5}
-        on_release: app.open_result(root.full_path)
+    BoxLayout:
+        size_hint_y: None
+        height: dp(40)
+        spacing: dp(8)
+        padding: dp(4), 0
+        
+        MDRaisedButton:
+            text: 'Open File'
+            icon: 'file-document'
+            on_release: app.open_result(root.full_path)
+            
+        MDRaisedButton:
+            text: 'Show in Folder'
+            icon: 'folder-open'
+            on_release: app.open_file_location(root.full_path)
 
 <ExpandableCard@MDCard>:
     orientation: 'vertical'
@@ -731,6 +740,47 @@ class DocuFindLocalApp(MDApp):
                 os.system(f'xdg-open "{p}"')
         except Exception as e:
             self._show_error(f"Could not open file: {e}")
+
+    def open_file_location(self, full_path: str) -> None:
+        """Open file location in explorer/finder with the file highlighted."""
+        if not full_path:
+            return
+        if platform == "android":
+            self._set_status("Opening file location is desktop-only for now")
+            return
+        try:
+            p = Path(full_path)
+            if not p.exists():
+                self._show_error("File not found on disk")
+                return
+            
+            if platform == "win":
+                # Windows: Use explorer with /select flag to highlight the file
+                import subprocess
+                subprocess.run(['explorer', '/select,', str(p)])
+            elif platform == "macosx":
+                # macOS: Use 'open -R' to reveal in Finder
+                os.system(f'open -R "{p}"')
+            else:
+                # Linux: Try various file managers
+                # Most don't support highlighting, so open parent folder
+                parent = p.parent
+                try:
+                    # Try nautilus (GNOME) with --select
+                    import subprocess
+                    result = subprocess.run(['nautilus', '--select', str(p)], 
+                                          capture_output=True, timeout=2)
+                    if result.returncode != 0:
+                        raise Exception("Nautilus not available")
+                except:
+                    try:
+                        # Try dolphin (KDE) with --select
+                        subprocess.run(['dolphin', '--select', str(p)], timeout=2)
+                    except:
+                        # Fallback: just open the parent folder
+                        os.system(f'xdg-open "{parent}"')
+        except Exception as e:
+            self._show_error(f"Could not open file location: {e}")
 
 
 if __name__ == "__main__":

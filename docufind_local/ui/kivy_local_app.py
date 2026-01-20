@@ -322,9 +322,10 @@ ScrollView:
 
         # Results Card
         ExpandableCard:
-            height: dp(600) if app.has_results else dp(100)
+            height: results_box.height + dp(32)
             
             BoxLayout:
+                id: results_box
                 orientation: 'vertical'
                 spacing: dp(12)
                 size_hint_y: None
@@ -345,19 +346,13 @@ ScrollView:
                     height: self.texture_size[1]
                     opacity: 1 if app.has_results else 0.5
 
-                ScrollView:
+                GridLayout:
+                    id: results_container
+                    cols: 1
+                    spacing: dp(12)
                     size_hint_y: None
-                    height: dp(500) if app.has_results else 0
-                    do_scroll_x: False
-                    bar_width: dp(8)
-                    
-                    GridLayout:
-                        id: results_container
-                        cols: 1
-                        spacing: dp(12)
-                        size_hint_y: None
-                        height: self.minimum_height
-                        padding: dp(4)
+                    height: self.minimum_height
+                    padding: dp(4)
 '''
 
 

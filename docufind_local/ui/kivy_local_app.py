@@ -229,22 +229,22 @@ ScrollView:
                     MDRaisedButton:
                         text: 'All Files'
                         on_release: app.set_file_type('all')
-                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'all' else app.theme_cls.bg_dark
+                        md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'all' else [0.6, 0.6, 0.6, 1]
 
                     MDRaisedButton:
                         text: 'Text'
                         on_release: app.set_file_type('text')
-                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'text' else app.theme_cls.bg_dark
+                        md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'text' else [0.6, 0.6, 0.6, 1]
 
                     MDRaisedButton:
                         text: 'Documents'
                         on_release: app.set_file_type('doc')
-                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'doc' else app.theme_cls.bg_dark
+                        md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'doc' else [0.6, 0.6, 0.6, 1]
 
                     MDRaisedButton:
                         text: 'Images'
                         on_release: app.set_file_type('image')
-                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'image' else app.theme_cls.bg_dark
+                        md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'image' else [0.6, 0.6, 0.6, 1]
 
                 MDLabel:
                     text: app.file_type_extensions

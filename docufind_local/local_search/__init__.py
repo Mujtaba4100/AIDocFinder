@@ -1,4 +1,5 @@
 __all__ = [
+    "captioner",
     "constants",
     "db",
     "embedder",

@@ -14,5 +14,10 @@ rapidocr-onnxruntime
 fastembed
 onnxruntime
 
+# Image captioning (BLIP) - optional but recommended for intelligent search
+transformers
+accelerate
+sentencepiece
+
 # Optional PDF fallback extractor
 pypdf

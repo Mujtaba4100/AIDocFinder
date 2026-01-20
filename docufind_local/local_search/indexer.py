@@ -20,7 +20,8 @@ ProgressCb = Callable[[str], None]
 
 # Batch sizes for efficient processing
 TEXT_BATCH_SIZE = 64
-IMAGE_BATCH_SIZE = 16
+IMAGE_BATCH_SIZE = 8  # Smaller batch for BLIP memory efficiency
+CLIP_BATCH_SIZE = 16
 MAX_WORKERS = 4  # Thread pool size for parallel text extraction
 
 
@@ -30,6 +31,7 @@ class IndexStats:
     indexed: int = 0
     skipped: int = 0
     failed: int = 0
+    captioned: int = 0  # Track images that got captions
     _lock: Lock = field(default_factory=Lock, repr=False)
     
     def inc_scanned(self) -> None:
@@ -47,6 +49,10 @@ class IndexStats:
     def inc_failed(self) -> None:
         with self._lock:
             self.failed += 1
+    
+    def inc_captioned(self) -> None:
+        with self._lock:
+            self.captioned += 1
 
 
 @dataclass
@@ -78,6 +84,27 @@ class LocalIndexer:
         self.extractor = TextExtractor(self.ocr)
         self.embedder = TextEmbedder(cache_dir=self.cache_dir)
         self.clip = ClipEmbedder(cache_dir=self.cache_dir)
+        
+        # Initialize BLIP captioner (optional - gracefully degrades if unavailable)
+        self.captioner = None
+        self.lightweight_captioner = None
+        self._init_captioner()
+    
+    def _init_captioner(self) -> None:
+        """Initialize image captioning (BLIP or lightweight fallback)."""
+        try:
+            from .captioner import BlipCaptioner, LightweightCaptioner
+            
+            # Try BLIP first
+            self.captioner = BlipCaptioner(cache_dir=self.cache_dir)
+            if not self.captioner.available:
+                self.captioner = None
+                # Fall back to lightweight CLIP-based captioner
+                self.lightweight_captioner = LightweightCaptioner(self.clip)
+        except Exception:
+            # Captioning unavailable - search will rely on CLIP + OCR only
+            self.captioner = None
+            self.lightweight_captioner = None
 
     def iter_files(self, folder: str | Path, recursive: bool = True, file_types: Optional[set[str]] = None) -> Iterable[Path]:
         root = Path(folder)
@@ -245,23 +272,52 @@ class LocalIndexer:
                 except Exception:
                     stats.failed += 1
 
-            # Phase 4: Process images - batch CLIP embedding + parallel OCR
+            # Phase 4: Process images - CLIP embedding + BLIP captioning + OCR
             if pending_images:
                 if progress:
                     progress(f"Processing {len(pending_images)} images...")
 
-                # Batch CLIP embeddings for all images (already efficient)
+                # Step 4a: Batch CLIP embeddings for all images
                 clip_vecs: List[Optional[np.ndarray]] = []
                 if self.clip.available:
                     try:
                         if progress:
                             progress(f"CLIP embedding {len(pending_images)} images...")
                         paths = [img.file_path for img in pending_images]
-                        clip_vecs = self.clip.embed_images(paths, batch_size=IMAGE_BATCH_SIZE)
+                        clip_vecs = self.clip.embed_images(paths, batch_size=CLIP_BATCH_SIZE)
                     except Exception:
                         clip_vecs = []
 
-                # Parallel OCR extraction for images
+                # Step 4b: Generate BLIP captions for all images
+                image_captions: List[str] = [""] * len(pending_images)
+                if self.captioner and self.captioner.available:
+                    try:
+                        if progress:
+                            progress(f"Generating BLIP captions for {len(pending_images)} images...")
+                        paths = [img.file_path for img in pending_images]
+                        image_captions = self.captioner.caption_images_batch(
+                            paths, max_length=50, batch_size=IMAGE_BATCH_SIZE
+                        )
+                        stats.captioned += sum(1 for c in image_captions if c)
+                    except Exception:
+                        pass
+                elif self.lightweight_captioner and self.lightweight_captioner.available:
+                    # Fall back to lightweight CLIP-based concept detection
+                    if progress:
+                        progress(f"Detecting concepts in {len(pending_images)} images...")
+                    for idx, img in enumerate(pending_images):
+                        if clip_vecs and idx < len(clip_vecs) and clip_vecs[idx] is not None:
+                            try:
+                                concepts = self.lightweight_captioner.get_image_concepts(
+                                    clip_vecs[idx], top_k=3, threshold=0.2
+                                )
+                                if concepts:
+                                    image_captions[idx] = concepts
+                                    stats.captioned += 1
+                            except Exception:
+                                pass
+
+                # Step 4c: Parallel OCR extraction for images (for text in images)
                 image_texts: List[str] = [""] * len(pending_images)
                 if progress:
                     progress(f"Parallel OCR on {len(pending_images)} images...")
@@ -277,28 +333,42 @@ class LocalIndexer:
                             _, text = future.result()
                             image_texts[idx] = text
                         except Exception:
-                            pass  # Keep empty string on failure
+                            pass
 
-                # Batch embed image OCR texts (only non-empty ones)
+                # Step 4d: Batch embed OCR texts (stored in embedding column)
                 text_embeddings: List[Optional[np.ndarray]] = [None] * len(pending_images)
                 if self.embedder.available:
-                    non_empty_indices = [i for i, t in enumerate(image_texts) if t]
-                    if non_empty_indices:
+                    non_empty_ocr = [i for i, t in enumerate(image_texts) if t]
+                    if non_empty_ocr:
                         if progress:
-                            progress(f"Embedding {len(non_empty_indices)} image OCR texts...")
-                        non_empty_texts = [image_texts[i] for i in non_empty_indices]
-                        batch_vecs = self.embedder.embed_texts_batch(non_empty_texts)
-                        for idx, vec in zip(non_empty_indices, batch_vecs):
+                            progress(f"Embedding {len(non_empty_ocr)} OCR texts...")
+                        texts = [image_texts[i] for i in non_empty_ocr]
+                        vecs = self.embedder.embed_texts_batch(texts)
+                        for idx, vec in zip(non_empty_ocr, vecs):
                             text_embeddings[idx] = vec
 
-                # Insert all images into DB
+                # Step 4e: Batch embed captions (stored in caption_embedding column)
+                caption_embeddings: List[Optional[np.ndarray]] = [None] * len(pending_images)
+                if self.embedder.available:
+                    non_empty_cap = [i for i, c in enumerate(image_captions) if c]
+                    if non_empty_cap:
+                        if progress:
+                            progress(f"Embedding {len(non_empty_cap)} captions...")
+                        captions = [image_captions[i] for i in non_empty_cap]
+                        vecs = self.embedder.embed_texts_batch(captions)
+                        for idx, vec in zip(non_empty_cap, vecs):
+                            caption_embeddings[idx] = vec
+
+                # Step 4f: Insert all images into DB
                 if progress:
                     progress(f"Saving {len(pending_images)} images to index...")
                     
                 for idx, img in enumerate(pending_images):
                     try:
-                        text = image_texts[idx]
+                        ocr_text = image_texts[idx]
+                        caption = image_captions[idx]
                         
+                        # OCR text embedding
                         text_blob = None
                         text_dim = None
                         if text_embeddings[idx] is not None:
@@ -307,6 +377,7 @@ class LocalIndexer:
                                 text_blob = tv.tobytes()
                                 text_dim = int(tv.shape[0])
 
+                        # CLIP image embedding
                         img_blob = None
                         img_dim = None
                         if clip_vecs and idx < len(clip_vecs) and clip_vecs[idx] is not None:
@@ -315,10 +386,22 @@ class LocalIndexer:
                                 img_blob = iv.tobytes()
                                 img_dim = int(iv.shape[0])
 
+                        # Caption embedding
+                        cap_blob = None
+                        cap_dim = None
+                        if caption_embeddings[idx] is not None:
+                            cv = np.asarray(caption_embeddings[idx], dtype=np.float32)
+                            if cv.ndim == 1 and cv.shape[0] > 1:
+                                cap_blob = cv.tobytes()
+                                cap_dim = int(cv.shape[0])
+
                         con.execute(
                             """
-                            INSERT INTO files(folder, path, rel_path, ext, mtime, size, extracted_text, embedding, embedding_dim, image_embedding, image_embedding_dim, updated_at)
-                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            INSERT INTO files(folder, path, rel_path, ext, mtime, size, 
+                                extracted_text, caption, embedding, embedding_dim, 
+                                image_embedding, image_embedding_dim, 
+                                caption_embedding, caption_embedding_dim, updated_at)
+                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(path) DO UPDATE SET
                               folder=excluded.folder,
                               rel_path=excluded.rel_path,
@@ -326,13 +409,18 @@ class LocalIndexer:
                               mtime=excluded.mtime,
                               size=excluded.size,
                               extracted_text=excluded.extracted_text,
+                              caption=excluded.caption,
                               embedding=excluded.embedding,
                               embedding_dim=excluded.embedding_dim,
                               image_embedding=excluded.image_embedding,
                               image_embedding_dim=excluded.image_embedding_dim,
+                              caption_embedding=excluded.caption_embedding,
+                              caption_embedding_dim=excluded.caption_embedding_dim,
                               updated_at=excluded.updated_at
                             """,
-                            (folder, str(img.file_path), img.rel, img.ext, img.mtime, img.size, text, text_blob, text_dim, img_blob, img_dim, now_ts()),
+                            (folder, str(img.file_path), img.rel, img.ext, img.mtime, img.size,
+                             ocr_text, caption, text_blob, text_dim, img_blob, img_dim,
+                             cap_blob, cap_dim, now_ts()),
                         )
                         stats.indexed += 1
                     except Exception:
@@ -353,6 +441,9 @@ class LocalIndexer:
             con.close()
 
         if progress:
-            progress(f"Done. Indexed: {stats.indexed}, skipped: {stats.skipped}, failed: {stats.failed}")
+            msg = f"Done. Indexed: {stats.indexed}, skipped: {stats.skipped}, failed: {stats.failed}"
+            if stats.captioned > 0:
+                msg += f", captioned: {stats.captioned}"
+            progress(msg)
         return stats
 

@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 from kivy.clock import Clock
 from kivy.lang import Builder
 from kivy.metrics import dp
-from kivy.properties import BooleanProperty, StringProperty
+from kivy.properties import BooleanProperty, StringProperty, ListProperty
 from kivy.utils import platform
 from kivy.uix.screenmanager import ScreenManager, Screen, FadeTransition
 
@@ -44,6 +44,7 @@ if __name__ == "__main__" and __package__ is None:
 TEXT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 CLIP_VISION_MODEL = "Qdrant/clip-ViT-B-32-vision"
 CLIP_TEXT_MODEL = "Qdrant/clip-ViT-B-32-text"
+BLIP_MODEL_NAME = "Salesforce/blip-image-captioning-base"  # Downloaded on-demand
 
 
 KV = r'''
@@ -452,13 +453,30 @@ KV = r'''
     radius: [dp(8)]
     elevation: 1
     
-    MDLabel:
-        text: root.file_name
-        font_style: 'Subtitle1'
-        bold: True
+    BoxLayout:
         size_hint_y: None
-        height: self.texture_size[1]
-        text_size: self.width, None
+        height: self.minimum_height
+        spacing: dp(8)
+        
+        MDLabel:
+            text: root.file_name
+            font_style: 'Subtitle1'
+            bold: True
+            size_hint_y: None
+            height: self.texture_size[1]
+            text_size: self.width - dp(80), None
+            size_hint_x: 1
+        
+        MDLabel:
+            text: root.source_badge
+            font_style: 'Caption'
+            halign: 'right'
+            size_hint_x: None
+            width: dp(70)
+            size_hint_y: None
+            height: self.texture_size[1]
+            theme_text_color: 'Custom'
+            text_color: root.badge_color
         
     MDLabel:
         text: root.file_path
@@ -466,6 +484,16 @@ KV = r'''
         theme_text_color: 'Secondary'
         size_hint_y: None
         height: self.texture_size[1]
+        text_size: self.width, None
+    
+    MDLabel:
+        text: root.caption_text
+        font_style: 'Caption'
+        theme_text_color: 'Hint'
+        italic: True
+        size_hint_y: None
+        height: self.texture_size[1] if root.caption_text else 0
+        opacity: 1 if root.caption_text else 0
         text_size: self.width, None
         
     MDLabel:
@@ -542,6 +570,9 @@ class ResultRow(MDCard):
     file_path = StringProperty("")
     score_text = StringProperty("")
     full_path = StringProperty("")
+    source_badge = StringProperty("")  # "📄 Text" | "🖼️ Image" | "💬 Caption" | "🔗 Hybrid"
+    caption_text = StringProperty("")  # BLIP-generated caption for images
+    badge_color = ListProperty([0.4, 0.4, 0.4, 1])  # Color for badge text
 
 
 def _app_data_dir(app: MDApp) -> Path:
@@ -1206,8 +1237,33 @@ class DocuFindLocalApp(MDApp):
                 row = ResultRow()
                 row.file_name = name
                 row.file_path = r.rel_path
-                row.score_text = f"Relevance score: {r.score:.3f}"
+                row.score_text = f"Relevance: {r.score:.3f}"
                 row.full_path = r.path
+                
+                # Set source badge and color based on result source
+                source = getattr(r, 'source', 'text')
+                if source == 'text':
+                    row.source_badge = "📄 Text"
+                    row.badge_color = [0.2, 0.5, 0.7, 1]  # Blue
+                elif source == 'image':
+                    row.source_badge = "🖼️ Visual"
+                    row.badge_color = [0.6, 0.3, 0.7, 1]  # Purple
+                elif source == 'caption':
+                    row.source_badge = "💬 Caption"
+                    row.badge_color = [0.2, 0.6, 0.4, 1]  # Green
+                elif source == 'hybrid':
+                    row.source_badge = "🔗 Hybrid"
+                    row.badge_color = [0.7, 0.5, 0.2, 1]  # Orange
+                else:
+                    row.source_badge = ""
+                    row.badge_color = [0.4, 0.4, 0.4, 1]
+                
+                # Show caption if available (for images)
+                caption = getattr(r, 'caption', '')
+                if caption:
+                    row.caption_text = f'"{caption}"'
+                else:
+                    row.caption_text = ""
                 container.add_widget(row)
         
         self._set_status(f"✅ Found {len(results)} result{'s' if len(results) != 1 else ''}")

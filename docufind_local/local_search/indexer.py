@@ -89,6 +89,10 @@ class LocalIndexer:
         self.captioner = None
         self.lightweight_captioner = None
         self._init_captioner()
+        
+        # Initialize YOLOv8 object detector (optional)
+        self.detector = None
+        self._init_detector()
     
     def _init_captioner(self) -> None:
         """Initialize image captioning (BLIP or lightweight fallback)."""
@@ -105,6 +109,17 @@ class LocalIndexer:
             # Captioning unavailable - search will rely on CLIP + OCR only
             self.captioner = None
             self.lightweight_captioner = None
+    
+    def _init_detector(self) -> None:
+        """Initialize YOLOv8 object detector."""
+        try:
+            from .detector import ObjectDetector
+            
+            self.detector = ObjectDetector(cache_dir=self.cache_dir)
+            if not self.detector.available:
+                self.detector = None
+        except Exception:
+            self.detector = None
 
     def iter_files(self, folder: str | Path, recursive: bool = True, file_types: Optional[set[str]] = None) -> Iterable[Path]:
         root = Path(folder)
@@ -272,7 +287,7 @@ class LocalIndexer:
                 except Exception:
                     stats.failed += 1
 
-            # Phase 4: Process images - CLIP embedding + BLIP captioning + OCR
+            # Phase 4: Process images - CLIP + YOLO detection + BLIP captioning + OCR
             if pending_images:
                 if progress:
                     progress(f"Processing {len(pending_images)} images...")
@@ -288,7 +303,22 @@ class LocalIndexer:
                     except Exception:
                         clip_vecs = []
 
-                # Step 4b: Generate BLIP captions for all images
+                # Step 4b: YOLOv8 object detection for all images
+                image_objects: List[str] = [""] * len(pending_images)
+                if self.detector and self.detector.available:
+                    try:
+                        if progress:
+                            progress(f"Detecting objects in {len(pending_images)} images (YOLOv8)...")
+                        paths = [img.file_path for img in pending_images]
+                        detections_list = self.detector.detect_objects_batch(
+                            paths, confidence_threshold=0.3, max_objects=15, batch_size=IMAGE_BATCH_SIZE
+                        )
+                        for idx, detections in enumerate(detections_list):
+                            image_objects[idx] = self.detector.format_objects_string(detections)
+                    except Exception:
+                        pass
+
+                # Step 4c: Generate BLIP captions for all images
                 image_captions: List[str] = [""] * len(pending_images)
                 if self.captioner and self.captioner.available:
                     try:
@@ -317,7 +347,7 @@ class LocalIndexer:
                             except Exception:
                                 pass
 
-                # Step 4c: Parallel OCR extraction for images (for text in images)
+                # Step 4d: Parallel OCR extraction for images (for text in images)
                 image_texts: List[str] = [""] * len(pending_images)
                 if progress:
                     progress(f"Parallel OCR on {len(pending_images)} images...")
@@ -335,7 +365,7 @@ class LocalIndexer:
                         except Exception:
                             pass
 
-                # Step 4d: Batch embed OCR texts (stored in embedding column)
+                # Step 4e: Batch embed OCR texts (stored in embedding column)
                 text_embeddings: List[Optional[np.ndarray]] = [None] * len(pending_images)
                 if self.embedder.available:
                     non_empty_ocr = [i for i, t in enumerate(image_texts) if t]
@@ -347,7 +377,7 @@ class LocalIndexer:
                         for idx, vec in zip(non_empty_ocr, vecs):
                             text_embeddings[idx] = vec
 
-                # Step 4e: Batch embed captions (stored in caption_embedding column)
+                # Step 4f: Batch embed captions (stored in caption_embedding column)
                 caption_embeddings: List[Optional[np.ndarray]] = [None] * len(pending_images)
                 if self.embedder.available:
                     non_empty_cap = [i for i, c in enumerate(image_captions) if c]
@@ -359,7 +389,19 @@ class LocalIndexer:
                         for idx, vec in zip(non_empty_cap, vecs):
                             caption_embeddings[idx] = vec
 
-                # Step 4f: Insert all images into DB
+                # Step 4g: Batch embed objects (stored in objects_embedding column)
+                objects_embeddings: List[Optional[np.ndarray]] = [None] * len(pending_images)
+                if self.embedder.available:
+                    non_empty_obj = [i for i, o in enumerate(image_objects) if o]
+                    if non_empty_obj:
+                        if progress:
+                            progress(f"Embedding {len(non_empty_obj)} object labels...")
+                        obj_texts = [image_objects[i] for i in non_empty_obj]
+                        vecs = self.embedder.embed_texts_batch(obj_texts)
+                        for idx, vec in zip(non_empty_obj, vecs):
+                            objects_embeddings[idx] = vec
+
+                # Step 4h: Insert all images into DB
                 if progress:
                     progress(f"Saving {len(pending_images)} images to index...")
                     
@@ -367,6 +409,7 @@ class LocalIndexer:
                     try:
                         ocr_text = image_texts[idx]
                         caption = image_captions[idx]
+                        objects = image_objects[idx]
                         
                         # OCR text embedding
                         text_blob = None
@@ -395,13 +438,23 @@ class LocalIndexer:
                                 cap_blob = cv.tobytes()
                                 cap_dim = int(cv.shape[0])
 
+                        # Objects embedding
+                        obj_blob = None
+                        obj_dim = None
+                        if objects_embeddings[idx] is not None:
+                            ov = np.asarray(objects_embeddings[idx], dtype=np.float32)
+                            if ov.ndim == 1 and ov.shape[0] > 1:
+                                obj_blob = ov.tobytes()
+                                obj_dim = int(ov.shape[0])
+
                         con.execute(
                             """
                             INSERT INTO files(folder, path, rel_path, ext, mtime, size, 
-                                extracted_text, caption, embedding, embedding_dim, 
+                                extracted_text, caption, objects, embedding, embedding_dim, 
                                 image_embedding, image_embedding_dim, 
-                                caption_embedding, caption_embedding_dim, updated_at)
-                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                caption_embedding, caption_embedding_dim,
+                                objects_embedding, objects_embedding_dim, updated_at)
+                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(path) DO UPDATE SET
                               folder=excluded.folder,
                               rel_path=excluded.rel_path,
@@ -410,17 +463,20 @@ class LocalIndexer:
                               size=excluded.size,
                               extracted_text=excluded.extracted_text,
                               caption=excluded.caption,
+                              objects=excluded.objects,
                               embedding=excluded.embedding,
                               embedding_dim=excluded.embedding_dim,
                               image_embedding=excluded.image_embedding,
                               image_embedding_dim=excluded.image_embedding_dim,
                               caption_embedding=excluded.caption_embedding,
                               caption_embedding_dim=excluded.caption_embedding_dim,
+                              objects_embedding=excluded.objects_embedding,
+                              objects_embedding_dim=excluded.objects_embedding_dim,
                               updated_at=excluded.updated_at
                             """,
                             (folder, str(img.file_path), img.rel, img.ext, img.mtime, img.size,
-                             ocr_text, caption, text_blob, text_dim, img_blob, img_dim,
-                             cap_blob, cap_dim, now_ts()),
+                             ocr_text, caption, objects, text_blob, text_dim, img_blob, img_dim,
+                             cap_blob, cap_dim, obj_blob, obj_dim, now_ts()),
                         )
                         stats.indexed += 1
                     except Exception:

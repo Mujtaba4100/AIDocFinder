@@ -446,7 +446,7 @@ KV = r'''
 <ResultRow>:
     orientation: 'vertical'
     size_hint_y: None
-    height: dp(120)
+    height: dp(140)
     padding: dp(12), dp(8)
     spacing: dp(4)
     md_bg_color: app.theme_cls.bg_light
@@ -494,6 +494,15 @@ KV = r'''
         size_hint_y: None
         height: self.texture_size[1] if root.caption_text else 0
         opacity: 1 if root.caption_text else 0
+        text_size: self.width, None
+    
+    MDLabel:
+        text: root.objects_text
+        font_style: 'Caption'
+        theme_text_color: 'Hint'
+        size_hint_y: None
+        height: self.texture_size[1] if root.objects_text else 0
+        opacity: 1 if root.objects_text else 0
         text_size: self.width, None
         
     MDLabel:
@@ -570,8 +579,9 @@ class ResultRow(MDCard):
     file_path = StringProperty("")
     score_text = StringProperty("")
     full_path = StringProperty("")
-    source_badge = StringProperty("")  # "📄 Text" | "🖼️ Image" | "💬 Caption" | "🔗 Hybrid"
+    source_badge = StringProperty("")  # "📄 Text" | "🖼️ Image" | "💬 Caption" | "🎯 Objects" | "🔗 Hybrid"
     caption_text = StringProperty("")  # BLIP-generated caption for images
+    objects_text = StringProperty("")  # YOLOv8 detected objects
     badge_color = ListProperty([0.4, 0.4, 0.4, 1])  # Color for badge text
 
 
@@ -1251,6 +1261,9 @@ class DocuFindLocalApp(MDApp):
                 elif source == 'caption':
                     row.source_badge = "💬 Caption"
                     row.badge_color = [0.2, 0.6, 0.4, 1]  # Green
+                elif source == 'objects':
+                    row.source_badge = "🎯 Objects"
+                    row.badge_color = [0.8, 0.4, 0.2, 1]  # Orange-red
                 elif source == 'hybrid':
                     row.source_badge = "🔗 Hybrid"
                     row.badge_color = [0.7, 0.5, 0.2, 1]  # Orange
@@ -1264,6 +1277,14 @@ class DocuFindLocalApp(MDApp):
                     row.caption_text = f'"{caption}"'
                 else:
                     row.caption_text = ""
+                
+                # Show detected objects if available
+                objects = getattr(r, 'objects', '')
+                if objects:
+                    row.objects_text = f'🎯 {objects}'
+                else:
+                    row.objects_text = ""
+                    
                 container.add_widget(row)
         
         self._set_status(f"✅ Found {len(results)} result{'s' if len(results) != 1 else ''}")

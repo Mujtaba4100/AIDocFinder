@@ -19,5 +19,8 @@ transformers
 accelerate
 sentencepiece
 
+# Object detection (YOLOv8) - optional but recommended for object-based search
+ultralytics
+
 # Optional PDF fallback extractor
 pypdf

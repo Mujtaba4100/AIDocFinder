@@ -10,6 +10,17 @@ import numpy as np
 from .db import open_db
 from .embedder import ClipEmbedder, TextEmbedder
 
+# Import detector for object matching
+try:
+    from .detector import normalize_query_objects, objects_match_query
+    DETECTOR_AVAILABLE = True
+except ImportError:
+    DETECTOR_AVAILABLE = False
+    def normalize_query_objects(query: str) -> List[str]:
+        return []
+    def objects_match_query(objects_str: str, query_objects: List[str]) -> float:
+        return 0.0
+
 
 # ---------------------------------------------------------------------------
 # Query Preprocessing: Minimal stop word removal for semantic search
@@ -65,12 +76,12 @@ def _keyword_matches_text(keywords: Set[str], filename: str, extracted_text: str
 
 
 # ---------------------------------------------------------------------------
-# Scoring Weights for Hybrid Search
+# Scoring Weights for Hybrid Search (Updated for object detection)
 # ---------------------------------------------------------------------------
 TEXT_WEIGHT = 0.4       # Weight for document text embedding matches
-IMAGE_WEIGHT = 0.5      # Weight for CLIP visual-semantic matches
-CAPTION_WEIGHT = 0.1    # Weight for BLIP caption embedding matches
-# Note: OCR text for images uses remaining weight from IMAGE_WEIGHT
+CAPTION_WEIGHT = 0.4    # Weight for BLIP caption embedding matches
+OBJECTS_WEIGHT = 0.2    # Weight for YOLOv8 detected objects
+# Note: For images, we combine CLIP visual + caption + objects
 
 
 @dataclass
@@ -78,8 +89,9 @@ class SearchResult:
     path: str
     rel_path: str
     score: float
-    source: str  # 'text' | 'image' | 'caption' | 'hybrid'
+    source: str  # 'text' | 'image' | 'caption' | 'objects' | 'hybrid'
     caption: str = ""  # BLIP-generated caption for images
+    objects: str = ""  # YOLOv8 detected objects
 
 
 class LocalSearcher:
@@ -88,12 +100,14 @@ class LocalSearcher:
     - Text embeddings for document semantic search
     - CLIP embeddings for visual-semantic image understanding
     - BLIP caption embeddings for descriptive image search
-    - Weighted scoring for intelligent result ranking
+    - YOLOv8 object detection embeddings for object-based search
+    - Weighted scoring: text=0.4, caption=0.4, objects=0.2
     
     Handles natural language queries like:
     - "rooftop selfie smiling"
     - "boy playing with a dog"
     - "invoice from 2024"
+    - "car in parking lot"
     """
     
     def __init__(self, db_path: str | Path, cache_dir: str | Path) -> None:
@@ -132,9 +146,12 @@ class LocalSearcher:
         # Extract keywords for document text validation
         query_keywords = _extract_keywords(query)
         
+        # Extract objects from query for direct matching boost
+        query_objects = normalize_query_objects(query) if DETECTOR_AVAILABLE else []
+        
         # Thresholds
         text_min_score = float(min_score) if min_score else 0.15
-        image_min_score = 0.18  # Lower threshold for visual matches
+        image_min_score = 0.15  # Lower threshold for visual matches
 
         # Compute text embedding for document and caption search
         q_text: Optional[np.ndarray] = None
@@ -155,7 +172,7 @@ class LocalSearcher:
                 "No embedding backend available. Install fastembed/onnxruntime."
             )
 
-        # Fetch indexed files from DB (including new caption columns)
+        # Fetch indexed files from DB (including objects columns)
         con = open_db(self.db_path)
         try:
             where_clause = "WHERE folder = ?"
@@ -166,10 +183,11 @@ class LocalSearcher:
                 params.extend(file_types)
             rows = con.execute(
                 f"""
-                SELECT path, rel_path, extracted_text, caption, ext,
+                SELECT path, rel_path, extracted_text, caption, objects, ext,
                        embedding, embedding_dim,
                        image_embedding, image_embedding_dim,
-                       caption_embedding, caption_embedding_dim
+                       caption_embedding, caption_embedding_dim,
+                       objects_embedding, objects_embedding_dim
                 FROM files
                 {where_clause}
                 """,
@@ -183,16 +201,17 @@ class LocalSearcher:
 
         # Categorize items by type
         doc_items: List[Tuple[str, str, str, np.ndarray]] = []  # path, rel, text, vec
-        img_items: List[Tuple[str, str, str, str, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]] = []
-        # img_items: path, rel, ocr_text, caption, clip_vec, ocr_vec, caption_vec
+        img_items: List[Tuple[str, str, str, str, str, np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]] = []
+        # img_items: path, rel, ocr_text, caption, objects, clip_vec, ocr_vec, caption_vec, objects_vec
 
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
         doc_exts = {".pdf", ".docx", ".doc", ".txt", ".md", ".rtf"}
 
         for row in rows:
-            p, rel, extracted_text, caption, ext, tblob, tdim, iblob, idim, cblob, cdim = row
+            p, rel, extracted_text, caption, objects, ext, tblob, tdim, iblob, idim, cblob, cdim, oblob, odim = row
             extracted_text = extracted_text or ""
             caption = caption or ""
+            objects = objects or ""
             ext = (ext or "").lower()
             
             # Documents: use text embedding
@@ -203,7 +222,7 @@ class LocalSearcher:
                     if tv.shape[0] == q_text.shape[0]:
                         doc_items.append((str(p), str(rel), extracted_text, tv))
             
-            # Images: use CLIP + caption + OCR embeddings
+            # Images: use CLIP + caption + objects + OCR embeddings
             if ext in image_exts and iblob is not None and q_img is not None:
                 idv = int(idim) if idim is not None else 0
                 if idv > 0:
@@ -229,8 +248,17 @@ class LocalSearcher:
                             if cv.shape[0] == q_text.shape[0]:
                                 caption_vec = cv
                     
-                    img_items.append((str(p), str(rel), extracted_text, caption, 
-                                     clip_vec, ocr_vec, caption_vec))
+                    # Objects embedding
+                    objects_vec = None
+                    if oblob is not None and q_text is not None:
+                        od = int(odim) if odim is not None else 0
+                        if od > 0:
+                            ov = np.frombuffer(oblob, dtype=np.float32, count=od)
+                            if ov.shape[0] == q_text.shape[0]:
+                                objects_vec = ov
+                    
+                    img_items.append((str(p), str(rel), extracted_text, caption, objects,
+                                     clip_vec, ocr_vec, caption_vec, objects_vec))
 
         scores_by_path: Dict[str, SearchResult] = {}
 
@@ -259,12 +287,13 @@ class LocalSearcher:
                         path=p, rel_path=rel, score=weighted_score, source="text"
                     )
 
-        # Score images using CLIP + caption + OCR (hybrid semantic search)
+        # Score images using CLIP + caption + objects (hybrid semantic search)
+        # Weights: caption=0.4, objects=0.2, CLIP provides base matching
         if img_items and q_img is not None:
-            clip_mat = np.vstack([v for (_, _, _, _, v, _, _) in img_items])
+            clip_mat = np.vstack([v for (_, _, _, _, _, v, _, _, _) in img_items])
             clip_scores = clip_mat @ q_img
             
-            for idx, (p, rel, ocr_text, caption, _, ocr_vec, caption_vec) in enumerate(img_items):
+            for idx, (p, rel, ocr_text, caption, objects, _, ocr_vec, caption_vec, objects_vec) in enumerate(img_items):
                 clip_score = float(clip_scores[idx])
                 clip_score = max(0.0, min(1.0, clip_score))
                 
@@ -274,6 +303,17 @@ class LocalSearcher:
                     caption_score = float(np.dot(caption_vec, q_text))
                     caption_score = max(0.0, min(1.0, caption_score))
                 
+                # Objects embedding score (YOLOv8 detected objects)
+                objects_score = 0.0
+                if objects_vec is not None and q_text is not None:
+                    objects_score = float(np.dot(objects_vec, q_text))
+                    objects_score = max(0.0, min(1.0, objects_score))
+                
+                # Direct object matching boost (if query contains object names)
+                object_match_boost = 0.0
+                if DETECTOR_AVAILABLE and objects and query_objects:
+                    object_match_boost = objects_match_query(objects, query_objects)
+                
                 # OCR text score (text found in images)
                 ocr_score = 0.0
                 if ocr_vec is not None and q_text is not None:
@@ -281,19 +321,24 @@ class LocalSearcher:
                     ocr_score = max(0.0, min(1.0, ocr_score))
                 
                 # Combined weighted score:
-                # CLIP visual = 0.5, Caption = 0.1, OCR gets remaining weight
+                # Caption = 0.4, Objects = 0.2, CLIP visual provides base
+                # Use CLIP as tie-breaker/base score
                 weighted_score = (
-                    clip_score * IMAGE_WEIGHT +
                     caption_score * CAPTION_WEIGHT +
-                    ocr_score * 0.05  # Small boost for OCR matches
+                    objects_score * OBJECTS_WEIGHT +
+                    clip_score * 0.3 +  # CLIP as base visual match
+                    ocr_score * 0.05 +  # Small boost for OCR matches
+                    object_match_boost * 0.1  # Bonus for exact object matches
                 )
                 
-                # Minimum threshold on visual similarity
-                if clip_score < image_min_score:
+                # Minimum threshold: either good CLIP match or good caption/objects
+                if clip_score < image_min_score and caption_score < 0.2 and objects_score < 0.2:
                     continue
                 
-                # Determine source type
-                if caption_score > 0.3 and caption_score > ocr_score:
+                # Determine source type based on dominant score
+                if object_match_boost > 0.3 or objects_score > max(caption_score, clip_score * 0.8):
+                    source = "objects"
+                elif caption_score > max(objects_score, clip_score * 0.8):
                     source = "caption"
                 elif ocr_score > 0.3:
                     source = "hybrid"
@@ -304,7 +349,7 @@ class LocalSearcher:
                 if prev is None or weighted_score > prev.score:
                     scores_by_path[p] = SearchResult(
                         path=p, rel_path=rel, score=weighted_score, 
-                        source=source, caption=caption
+                        source=source, caption=caption, objects=objects
                     )
 
         if not scores_by_path:

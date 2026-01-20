@@ -2,6 +2,7 @@ __all__ = [
     "captioner",
     "constants",
     "db",
+    "detector",
     "embedder",
     "indexer",
     "ocr",

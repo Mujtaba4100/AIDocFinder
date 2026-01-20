@@ -1,11 +1,6 @@
-"""DocuFindLocal Desktop (Local Search)
+"""DocuFindLocal Desktop (Local Search) - Responsive UI
 
-100% local, privacy-safe desktop app:
-- User selects a folder
-- Sync indexes supported files into local SQLite (text extraction + OCR + embeddings)
-- Search runs locally over cached embeddings
-
-Backend is NOT required.
+100% local, privacy-safe desktop app with responsive design.
 """
 
 from __future__ import annotations
@@ -24,7 +19,7 @@ from kivy.properties import BooleanProperty, StringProperty
 from kivy.utils import platform
 
 from kivymd.app import MDApp
-from kivymd.uix.button import MDRaisedButton
+from kivymd.uix.button import MDRaisedButton, MDFlatButton, MDIconButton
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.filemanager import MDFileManager
 
@@ -45,183 +40,315 @@ from docufind_local.local_search.searcher import LocalSearcher
 
 
 KV = r'''
+#:import Window kivy.core.window.Window
+
 <ResultRow>:
-    text: root.row_title
-    text_color: app.theme_cls.text_color
-    md_bg_color: app.theme_cls.bg_normal
-    size_hint_y: None
-    height: dp(72)
-    halign: 'left'
-    on_release: app.open_result(root.full_path)
-
-BoxLayout:
     orientation: 'vertical'
-    padding: dp(12)
-    spacing: dp(10)
-
-    MDTopAppBar:
-        title: 'DocuFindLocal'
-        elevation: 2
-
-    MDCard:
-        orientation: 'vertical'
-        padding: dp(12)
-        spacing: dp(10)
-        size_hint_y: None
-        height: dp(300)
-
-        MDLabel:
-            text: 'Folder'
-            font_style: 'Subtitle1'
-            size_hint_y: None
-            height: self.texture_size[1]
-
-        MDLabel:
-            id: folder_label
-            text: 'Selected Folder: ' + (app.selected_folder if app.selected_folder else 'None')
-            theme_text_color: 'Hint'
-            size_hint_y: None
-            height: self.texture_size[1]
-
-        BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            spacing: dp(8)
-
-            MDRaisedButton:
-                text: 'Browse Folder'
-                on_release: app.open_folder_picker()
-
-            MDRaisedButton:
-                text: 'Sync Folder'
-                disabled: (not app.folder_selected) or app.loading
-                on_release: app.on_sync_clicked()
-
-            MDRaisedButton:
-                text: 'Clear Index'
-                disabled: app.loading
-                on_release: app.on_clear_index_clicked()
-
-            MDSpinner:
-                size_hint: None, None
-                size: dp(32), dp(32)
-                active: app.loading
-
-        MDLabel:
-            id: sync_status
-            text: app.status_text
-            theme_text_color: 'Hint'
-            size_hint_y: None
-            height: self.texture_size[1]
-
-        MDLabel:
-            text: 'File Types'
-            font_style: 'Subtitle1'
-            size_hint_y: None
-            height: self.texture_size[1]
-
-        BoxLayout:
-            orientation: 'horizontal'
-            size_hint_y: None
-            height: dp(44)
-            spacing: dp(8)
-
-            MDRaisedButton:
-                text: 'All'
-                on_release: app.set_file_type('all')
-                md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'all' else [0.6, 0.6, 0.6, 1]
-
-            MDRaisedButton:
-                text: 'Text'
-                on_release: app.set_file_type('text')
-                md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'text' else [0.6, 0.6, 0.6, 1]
-
-            MDRaisedButton:
-                text: 'Doc'
-                on_release: app.set_file_type('doc')
-                md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'doc' else [0.6, 0.6, 0.6, 1]
-
-            MDRaisedButton:
-                text: 'Image'
-                on_release: app.set_file_type('image')
-                md_bg_color: [0.2, 0.6, 0.86, 1] if app.selected_file_type == 'image' else [0.6, 0.6, 0.6, 1]
-
-        MDLabel:
-            text: app.file_type_extensions
-            theme_text_color: 'Hint'
-            size_hint_y: None
-            height: self.texture_size[1]
-
-        BoxLayout:
-            orientation: 'horizontal'
-            size_hint_y: None
-            height: dp(48)
-            spacing: dp(8)
-            MDCheckbox:
-                id: recursive_checkbox
-                active: app.search_recursive
-                on_active: app.set_search_recursive(self.active)
-            MDLabel:
-                text: "Search only in selected folder (no subfolders)"
-                valign: 'middle'
-                theme_text_color: "Primary"
-
-
-    MDCard:
-        orientation: 'vertical'
-        padding: dp(12)
-        spacing: dp(10)
-        size_hint_y: None
-        height: dp(160)
-
-        MDLabel:
-            text: 'Search (local embeddings)'
-            font_style: 'Subtitle1'
-            size_hint_y: None
-            height: self.texture_size[1]
-
-        MDTextField:
-            id: query_input
-            hint_text: 'Enter search query'
-            helper_text: 'Search is 100% local; files never leave your PC'
-            helper_text_mode: 'persistent'
-            on_text: app.on_query_changed(self.text)
-
-        BoxLayout:
-            size_hint_y: None
-            height: dp(44)
-            spacing: dp(8)
-
-            MDTextField:
-                id: limit_input
-                hint_text: 'Limit'
-                text: '10'
-                input_filter: 'int'
-                size_hint_x: 0.25
-
-            MDRaisedButton:
-                text: 'Search'
-                disabled: (not app.folder_selected) or (not app.query_ready) or app.loading
-                on_release: app.on_search_clicked()
-
+    size_hint_y: None
+    height: dp(100)
+    padding: dp(12), dp(8)
+    spacing: dp(4)
+    md_bg_color: app.theme_cls.bg_light
+    radius: [dp(8)]
+    elevation: 1
+    
     MDLabel:
-        text: 'Results'
+        text: root.file_name
         font_style: 'Subtitle1'
+        bold: True
+        size_hint_y: None
+        height: self.texture_size[1]
+        text_size: self.width, None
+        
+    MDLabel:
+        text: root.file_path
+        font_style: 'Caption'
+        theme_text_color: 'Secondary'
+        size_hint_y: None
+        height: self.texture_size[1]
+        text_size: self.width, None
+        
+    MDLabel:
+        text: root.score_text
+        font_style: 'Caption'
+        theme_text_color: 'Hint'
         size_hint_y: None
         height: self.texture_size[1]
 
-    RecycleView:
-        id: results_rv
-        viewclass: 'ResultRow'
-        bar_width: dp(8)
-        scroll_type: ['bars', 'content']
-        RecycleBoxLayout:
-            default_size: None, dp(72)
-            default_size_hint: 1, None
+    MDRaisedButton:
+        text: 'Open File'
+        size_hint: None, None
+        size: dp(100), dp(36)
+        pos_hint: {'center_x': 0.5}
+        on_release: app.open_result(root.full_path)
+
+<ExpandableCard@MDCard>:
+    orientation: 'vertical'
+    padding: dp(16)
+    spacing: dp(12)
+    size_hint_y: None
+    radius: [dp(12)]
+    elevation: 2
+    md_bg_color: app.theme_cls.bg_normal
+
+ScrollView:
+    do_scroll_x: False
+    do_scroll_y: True
+    bar_width: dp(10)
+    scroll_type: ['bars', 'content']
+    
+    BoxLayout:
+        orientation: 'vertical'
+        padding: dp(16)
+        spacing: dp(16)
+        size_hint_y: None
+        height: self.minimum_height
+
+        MDTopAppBar:
+            title: 'DocuFindLocal - Privacy-First Search'
+            elevation: 4
             size_hint_y: None
-            height: self.minimum_height
-            orientation: 'vertical'
-            spacing: dp(8)
+            height: dp(56)
+            md_bg_color: app.theme_cls.primary_color
+            left_action_items: [['folder-search', lambda x: None]]
+
+        # Folder Selection Card
+        ExpandableCard:
+            height: folder_box.height + dp(32)
+            
+            BoxLayout:
+                id: folder_box
+                orientation: 'vertical'
+                spacing: dp(12)
+                size_hint_y: None
+                height: self.minimum_height
+
+                MDLabel:
+                    text: '📁 Folder Selection'
+                    font_style: 'H6'
+                    bold: True
+                    size_hint_y: None
+                    height: self.texture_size[1]
+
+                MDCard:
+                    orientation: 'vertical'
+                    padding: dp(12)
+                    size_hint_y: None
+                    height: dp(60)
+                    md_bg_color: app.theme_cls.bg_dark if app.folder_selected else app.theme_cls.bg_light
+                    radius: [dp(8)]
+                    
+                    MDLabel:
+                        text: app.selected_folder if app.selected_folder else 'No folder selected'
+                        theme_text_color: 'Primary' if app.folder_selected else 'Hint'
+                        size_hint_y: None
+                        height: self.texture_size[1]
+                        text_size: self.width, None
+                        halign: 'left'
+
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(48)
+                    spacing: dp(8)
+
+                    MDRaisedButton:
+                        text: 'Browse'
+                        icon: 'folder-open'
+                        on_release: app.open_folder_picker()
+                        md_bg_color: app.theme_cls.primary_color
+
+                    MDRaisedButton:
+                        text: 'Sync'
+                        icon: 'sync'
+                        disabled: (not app.folder_selected) or app.loading
+                        on_release: app.on_sync_clicked()
+                        md_bg_color: app.theme_cls.accent_color if not self.disabled else app.theme_cls.disabled_hint_text_color
+
+                    MDFlatButton:
+                        text: 'Clear'
+                        disabled: app.loading
+                        on_release: app.on_clear_index_clicked()
+
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(32) if app.loading else 0
+                    opacity: 1 if app.loading else 0
+                    spacing: dp(8)
+                    
+                    MDSpinner:
+                        size_hint: None, None
+                        size: dp(24), dp(24)
+                        active: app.loading
+                        
+                    MDLabel:
+                        text: app.status_text
+                        theme_text_color: 'Primary'
+                        valign: 'center'
+
+                MDLabel:
+                    text: app.status_text
+                    theme_text_color: 'Hint'
+                    size_hint_y: None
+                    height: self.texture_size[1] if not app.loading else 0
+                    opacity: 0 if app.loading else 1
+
+        # File Type Filter Card
+        ExpandableCard:
+            height: filetype_box.height + dp(32)
+            
+            BoxLayout:
+                id: filetype_box
+                orientation: 'vertical'
+                spacing: dp(12)
+                size_hint_y: None
+                height: self.minimum_height
+
+                MDLabel:
+                    text: '🗂️ File Types'
+                    font_style: 'H6'
+                    bold: True
+                    size_hint_y: None
+                    height: self.texture_size[1]
+
+                GridLayout:
+                    cols: 2 if Window.width < dp(600) else 4
+                    spacing: dp(8)
+                    size_hint_y: None
+                    height: self.minimum_height
+                    row_default_height: dp(44)
+
+                    MDRaisedButton:
+                        text: 'All Files'
+                        on_release: app.set_file_type('all')
+                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'all' else app.theme_cls.bg_dark
+
+                    MDRaisedButton:
+                        text: 'Text'
+                        on_release: app.set_file_type('text')
+                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'text' else app.theme_cls.bg_dark
+
+                    MDRaisedButton:
+                        text: 'Documents'
+                        on_release: app.set_file_type('doc')
+                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'doc' else app.theme_cls.bg_dark
+
+                    MDRaisedButton:
+                        text: 'Images'
+                        on_release: app.set_file_type('image')
+                        md_bg_color: app.theme_cls.primary_color if app.selected_file_type == 'image' else app.theme_cls.bg_dark
+
+                MDLabel:
+                    text: app.file_type_extensions
+                    theme_text_color: 'Hint'
+                    font_style: 'Caption'
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+
+                BoxLayout:
+                    orientation: 'horizontal'
+                    size_hint_y: None
+                    height: dp(40)
+                    spacing: dp(8)
+                    
+                    MDCheckbox:
+                        id: recursive_checkbox
+                        active: app.search_recursive
+                        on_active: app.set_search_recursive(self.active)
+                        size_hint: None, None
+                        size: dp(32), dp(32)
+                        
+                    MDLabel:
+                        text: "Search subfolders recursively"
+                        valign: 'center'
+                        theme_text_color: "Primary"
+
+        # Search Card
+        ExpandableCard:
+            height: search_box.height + dp(32)
+            
+            BoxLayout:
+                id: search_box
+                orientation: 'vertical'
+                spacing: dp(12)
+                size_hint_y: None
+                height: self.minimum_height
+
+                MDLabel:
+                    text: '🔍 Search (100% Local & Private)'
+                    font_style: 'H6'
+                    bold: True
+                    size_hint_y: None
+                    height: self.texture_size[1]
+
+                MDTextField:
+                    id: query_input
+                    hint_text: 'Enter search query...'
+                    helper_text: '🔒 All searches are 100% local - files never leave your device'
+                    helper_text_mode: 'persistent'
+                    mode: 'rectangle'
+                    size_hint_y: None
+                    height: dp(70)
+                    on_text: app.on_query_changed(self.text)
+
+                BoxLayout:
+                    size_hint_y: None
+                    height: dp(48)
+                    spacing: dp(8)
+
+                    MDTextField:
+                        id: limit_input
+                        hint_text: 'Results'
+                        text: '10'
+                        input_filter: 'int'
+                        mode: 'rectangle'
+                        size_hint_x: 0.3
+
+                    MDRaisedButton:
+                        text: 'Search'
+                        icon: 'magnify'
+                        disabled: (not app.folder_selected) or (not app.query_ready) or app.loading
+                        on_release: app.on_search_clicked()
+                        md_bg_color: app.theme_cls.accent_color if not self.disabled else app.theme_cls.disabled_hint_text_color
+
+        # Results Card
+        ExpandableCard:
+            height: dp(600) if app.has_results else dp(100)
+            
+            BoxLayout:
+                orientation: 'vertical'
+                spacing: dp(12)
+                size_hint_y: None
+                height: self.minimum_height
+
+                MDLabel:
+                    text: '📋 Results'
+                    font_style: 'H6'
+                    bold: True
+                    size_hint_y: None
+                    height: self.texture_size[1]
+
+                MDLabel:
+                    text: app.results_summary
+                    theme_text_color: 'Secondary'
+                    font_style: 'Caption'
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    opacity: 1 if app.has_results else 0.5
+
+                ScrollView:
+                    size_hint_y: None
+                    height: dp(500) if app.has_results else 0
+                    do_scroll_x: False
+                    bar_width: dp(8)
+                    
+                    GridLayout:
+                        id: results_container
+                        cols: 1
+                        spacing: dp(12)
+                        size_hint_y: None
+                        height: self.minimum_height
+                        padding: dp(4)
 '''
 
 
@@ -229,12 +356,15 @@ from kivymd.uix.spinner import MDSpinner  # noqa: E402
 from kivymd.uix.toolbar import MDTopAppBar  # noqa: E402
 from kivymd.uix.card import MDCard  # noqa: E402
 from kivymd.uix.textfield import MDTextField  # noqa: E402
-from kivymd.uix.recycleview import MDRecycleView  # noqa: E402
 from kivymd.uix.selectioncontrol import MDCheckbox  # noqa: E402
+from kivy.uix.gridlayout import GridLayout  # noqa: E402
+from kivy.uix.scrollview import ScrollView  # noqa: E402
 
 
-class ResultRow(MDRaisedButton):
-    row_title = StringProperty("")
+class ResultRow(MDCard):
+    file_name = StringProperty("")
+    file_path = StringProperty("")
+    score_text = StringProperty("")
     full_path = StringProperty("")
 
 
@@ -269,14 +399,18 @@ class DocuFindLocalApp(MDApp):
     folder_selected = BooleanProperty(False)
     query_ready = BooleanProperty(False)
     loading = BooleanProperty(False)
-    status_text = StringProperty("Ready")
+    status_text = StringProperty("Ready to index your files")
     selected_file_type = StringProperty('all')
     file_type_extensions = StringProperty('All supported: .txt .md .pdf .docx .png .jpg .jpeg .bmp .webp .tiff .tif')
     search_recursive = BooleanProperty(True)
+    has_results = BooleanProperty(False)
+    results_summary = StringProperty("No results yet")
 
     def build(self):
-        self.title = "DocuFindLocal"
+        self.title = "DocuFindLocal - Privacy-First Search"
         self.theme_cls.primary_palette = "Blue"
+        self.theme_cls.accent_palette = "Teal"
+        self.theme_cls.theme_style = "Light"
         self.root = Builder.load_string(KV)
 
         self._dialog: Optional[MDDialog] = None
@@ -304,7 +438,7 @@ class DocuFindLocalApp(MDApp):
             except Exception:
                 pass
         self._dialog = MDDialog(
-            title="DocuFindLocal",
+            title="⚠️ DocuFindLocal",
             text=text,
             buttons=[MDRaisedButton(text="OK", on_release=lambda *_: self._dialog.dismiss())],
         )
@@ -314,7 +448,6 @@ class DocuFindLocalApp(MDApp):
         self._set_status(text)
         try:
             from kivymd.uix.snackbar import Snackbar
-
             Snackbar(text=text).open()
         except Exception:
             pass
@@ -367,21 +500,23 @@ class DocuFindLocalApp(MDApp):
             self._start_clear_index()
 
         self._dialog = MDDialog(
-            title="Clear local index?",
+            title="🗑️ Clear local index?",
             text=(
-                "This deletes the local search index database on this PC.\n\n"
-                "You will need to click 'Sync Folder' again to rebuild it."
+                "This will delete the local search index database.\n\n"
+                "You'll need to click 'Sync' again to rebuild it."
             ),
             buttons=[
-                MDRaisedButton(text="Cancel", on_release=_cancel),
-                MDRaisedButton(text="Clear", on_release=_confirm),
+                MDFlatButton(text="Cancel", on_release=_cancel),
+                MDRaisedButton(text="Clear Index", on_release=_confirm),
             ],
         )
         self._dialog.open()
 
     def _start_clear_index(self) -> None:
         self.loading = True
-        self.root.ids.results_rv.data = []
+        self.has_results = False
+        self.results_summary = "No results yet"
+        self.root.ids.results_container.clear_widgets()
         self._set_status("Clearing index...")
         threading.Thread(target=self._background_clear_index, daemon=True).start()
 
@@ -406,7 +541,7 @@ class DocuFindLocalApp(MDApp):
             self.indexer = LocalIndexer(db_path=self.db_path, cache_dir=self.cache_dir)
             self.searcher = LocalSearcher(db_path=self.db_path, cache_dir=self.cache_dir)
 
-            msg = "Index cleared. Please Sync Folder again." if deleted_any else "Index already cleared."
+            msg = "✅ Index cleared. Please sync folder again." if deleted_any else "Index was already cleared."
             Clock.schedule_once(lambda dt, _m=msg: self._on_clear_index_done(_m), 0)
         except Exception as e:
             err = str(e)
@@ -414,7 +549,6 @@ class DocuFindLocalApp(MDApp):
 
     def _on_clear_index_done(self, msg: str) -> None:
         self.loading = False
-        self.root.ids.results_rv.data = []
         self._toast(msg)
 
     def _on_clear_index_error(self, err: str) -> None:
@@ -466,7 +600,7 @@ class DocuFindLocalApp(MDApp):
             return
         self.selected_folder = str(p)
         self.folder_selected = True
-        self._set_status("Ready")
+        self._set_status("✅ Folder selected. Click 'Sync' to index files.")
 
     def on_sync_clicked(self) -> None:
         if not self.folder_selected:
@@ -478,12 +612,14 @@ class DocuFindLocalApp(MDApp):
                 "No embedding backend is available.\n\n"
                 f"Text embedder error: {self.indexer.embedder.init_error}\n"
                 f"Image (CLIP) embedder error: {self.indexer.clip.init_error}\n\n"
-                "Install fastembed + onnxruntime (recommended)."
+                "Please install fastembed + onnxruntime."
             )
             return
 
         self.loading = True
-        self.root.ids.results_rv.data = []
+        self.has_results = False
+        self.results_summary = "No results yet"
+        self.root.ids.results_container.clear_widgets()
         self._set_status("Syncing folder...")
         threading.Thread(target=self._background_sync, args=(self.selected_folder, self.search_recursive, self.get_file_types()), daemon=True).start()
 
@@ -493,7 +629,7 @@ class DocuFindLocalApp(MDApp):
                 Clock.schedule_once(lambda dt, _m=msg: self._set_status(_m), 0)
 
             stats = self.indexer.index_folder(folder, progress=progress, recursive=recursive, file_types=file_types)
-            final = f"Sync complete. Indexed: {stats.indexed}, skipped: {stats.skipped}, failed: {stats.failed}"
+            final = f"✅ Sync complete! Indexed: {stats.indexed}, Skipped: {stats.skipped}, Failed: {stats.failed}"
             Clock.schedule_once(lambda dt, _m=final: self._on_sync_done(_m), 0)
         except Exception as e:
             err = str(e)
@@ -513,14 +649,14 @@ class DocuFindLocalApp(MDApp):
             return
         query = (self.root.ids.query_input.text or "").strip()
         if not query:
-            self._show_error("Please enter a query.")
+            self._show_error("Please enter a search query.")
             return
         if not self.searcher.embedder.available and not self.searcher.clip.available:
             self._show_error(
                 "No embedding backend is available.\n\n"
                 f"Text embedder error: {self.searcher.embedder.init_error}\n"
                 f"Image (CLIP) embedder error: {self.searcher.clip.init_error}\n\n"
-                "Install fastembed + onnxruntime (recommended)."
+                "Please install fastembed + onnxruntime."
             )
             return
 
@@ -531,8 +667,10 @@ class DocuFindLocalApp(MDApp):
         limit = max(1, min(50, limit))
 
         self.loading = True
-        self.root.ids.results_rv.data = []
-        self._set_status("Searching...")
+        self.has_results = False
+        self.results_summary = "Searching..."
+        self.root.ids.results_container.clear_widgets()
+        self._set_status("🔍 Searching...")
         threading.Thread(target=self._background_search, args=(self.selected_folder, query, limit, self.get_file_types()), daemon=True).start()
 
     def _background_search(self, folder: str, query: str, limit: int, file_types: Optional[set[str]]) -> None:
@@ -545,28 +683,40 @@ class DocuFindLocalApp(MDApp):
 
     def _on_search_done(self, results) -> None:
         self.loading = False
+        container = self.root.ids.results_container
+        container.clear_widgets()
+        
         if not results:
-            self._set_status("No results (did you Sync Folder first?)")
-            self.root.ids.results_rv.data = []
+            self.has_results = False
+            self.results_summary = "No results found. Have you synced the folder?"
+            self._set_status("No results found")
             return
 
-        rv_data: List[Dict[str, Any]] = []
+        self.has_results = True
+        self.results_summary = f"Found {len(results)} result{'s' if len(results) != 1 else ''}"
+        
         for r in results:
             name = Path(r.rel_path).name
-            title = f"[{getattr(r, 'source', 'local')}] {name}  (score: {r.score:.3f})\n{r.rel_path}"
-            rv_data.append({"row_title": title, "full_path": r.path})
-        self.root.ids.results_rv.data = rv_data
-        self._set_status(f"Returned {len(rv_data)} results")
+            row = ResultRow()
+            row.file_name = name
+            row.file_path = r.rel_path
+            row.score_text = f"Relevance score: {r.score:.3f}"
+            row.full_path = r.path
+            container.add_widget(row)
+        
+        self._set_status(f"✅ Found {len(results)} result{'s' if len(results) != 1 else ''}")
 
     def _on_search_error(self, err: str) -> None:
         self.loading = False
+        self.has_results = False
+        self.results_summary = "Search failed"
         self._show_error(f"Search failed: {err}")
 
     def open_result(self, full_path: str) -> None:
         if not full_path:
             return
         if platform == "android":
-            self._set_status("Open file is desktop-only for now")
+            self._set_status("Opening files is desktop-only for now")
             return
         try:
             p = Path(full_path)

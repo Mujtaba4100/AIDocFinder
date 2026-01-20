@@ -120,6 +120,7 @@ ScrollView:
             height: dp(56)
             md_bg_color: app.theme_cls.primary_color
             left_action_items: [['folder-search', lambda x: None]]
+            right_action_items: [['help-circle', lambda x: app.open_guide_dialog()]]
 
         # Folder Selection Card
         ExpandableCard:
@@ -293,7 +294,6 @@ ScrollView:
                 MDTextField:
                     id: query_input
                     hint_text: 'Enter search query...'
-                    helper_text: '🔒 All searches are 100% local - files never leave your device'
                     helper_text_mode: 'persistent'
                     mode: 'rectangle'
                     size_hint_y: None
@@ -455,6 +455,34 @@ class DocuFindLocalApp(MDApp):
             Snackbar(text=text).open()
         except Exception:
             pass
+
+    def open_guide_dialog(self) -> None:
+        """Show a short usage guide explaining how to run the app."""
+        if self._dialog:
+            try:
+                self._dialog.dismiss()
+            except Exception:
+                pass
+
+        guide_text = (
+            "How to use DocuFindLocal:\n\n"
+            "1) Click 'Browse' and choose a folder which contains documents to search.\n"
+            "(This folder will be the destination scanned for documents.)\n\n"
+            "2) Click 'Sync' to index files in the chosen folder.\n\n"
+            "3) Choose the file type filter (Documents, Images, Text or All).\n"
+            "If unsure, select 'All'.\n\n"
+            "4) (Optional) Check 'Search subfolders recursively' to include files in subdirectories.\n\n"
+            "5) Enter a search query relevant to the document you want to find.\n\n"
+            "6) Optionally set the number of results to return. Best value: 3\n\n"
+            "7) Click 'Search' and view matching results in the Results section.\n"
+        )
+
+        self._dialog = MDDialog(
+            title="Guide — How to run",
+            text=guide_text,
+            buttons=[MDFlatButton(text="OK", on_release=lambda *_: self._dialog.dismiss())],
+        )
+        self._dialog.open()
 
     def on_query_changed(self, text: str) -> None:
         self.query_ready = bool((text or "").strip())

@@ -554,11 +554,19 @@ def _get_bundled_cache_path() -> Optional[Path]:
     For onefile builds: sys._MEIPASS / fastembed_cache
     For onedir builds: executable directory / fastembed_cache
     """
+    print("\n========== DIAGNOSTIC: _get_bundled_cache_path() ==========")
+    print(f"sys.frozen: {getattr(sys, 'frozen', False)}")
+    print(f"sys.executable: {sys.executable}")
+    
     # Check for onefile build (_MEIPASS is the temp extraction dir)
     meipass = getattr(sys, "_MEIPASS", None)
+    print(f"sys._MEIPASS: {meipass}")
     if meipass:
         candidate = Path(meipass) / "fastembed_cache"
+        print(f"Checking onefile candidate: {candidate}")
+        print(f"  Exists: {candidate.exists()}, Is dir: {candidate.is_dir() if candidate.exists() else 'N/A'}")
         if candidate.exists() and candidate.is_dir():
+            print(f"  ✓ Found bundled cache (onefile): {candidate}")
             return candidate
     
     # Check for onedir build (files are next to the executable)
@@ -566,9 +574,14 @@ def _get_bundled_cache_path() -> Optional[Path]:
         # sys.executable points to the .exe in frozen builds
         exe_dir = Path(sys.executable).parent
         candidate = exe_dir / "fastembed_cache"
+        print(f"Checking onedir candidate: {candidate}")
+        print(f"  Exists: {candidate.exists()}, Is dir: {candidate.is_dir() if candidate.exists() else 'N/A'}")
         if candidate.exists() and candidate.is_dir():
+            print(f"  ✓ Found bundled cache (onedir): {candidate}")
             return candidate
     
+    print("  ✗ No bundled cache found")
+    print("=========================================================\n")
     return None
 
 
@@ -577,21 +590,36 @@ def _copy_bundled_cache_if_present(dst_dir: Path) -> None:
     
     Works for both onefile and onedir PyInstaller builds.
     """
+    print("\n========== DIAGNOSTIC: _copy_bundled_cache_if_present() ==========")
+    print(f"Destination dir: {dst_dir}")
+    
     src = _get_bundled_cache_path()
     if not src:
+        print("No bundled cache source found - skipping copy")
+        print("=================================================================\n")
         return
 
     # Skip if destination already has content (models already cached)
-    if dst_dir.exists() and any(dst_dir.iterdir()):
-        return
+    print(f"Destination exists: {dst_dir.exists()}")
+    if dst_dir.exists():
+        contents = list(dst_dir.iterdir())
+        print(f"Destination contents ({len(contents)} items): {[p.name for p in contents[:10]]}")
+        if any(dst_dir.iterdir()):
+            print("Destination already has content - skipping copy")
+            print("=================================================================\n")
+            return
 
+    print(f"Copying bundled cache from {src} to {dst_dir}")
     dst_dir.mkdir(parents=True, exist_ok=True)
     for item in src.iterdir():
         target = dst_dir / item.name
+        print(f"  Copying: {item.name}")
         if item.is_dir():
             shutil.copytree(item, target, dirs_exist_ok=True)
         else:
             shutil.copy2(item, target)
+    print("✓ Bundled cache copied successfully")
+    print("=================================================================\n")
 
 
 class DocuFindLocalApp(MDApp):
@@ -611,6 +639,10 @@ class DocuFindLocalApp(MDApp):
     setup_status = StringProperty("")
 
     def build(self):
+        print("\n" + "="*80)
+        print("DIAGNOSTIC: DocuFindLocalApp.build() starting")
+        print("="*80)
+        
         self.title = "DocuFindLocal - Privacy-First Search"
         self.theme_cls.primary_palette = "Blue"
         self.theme_cls.accent_palette = "Teal"
@@ -622,39 +654,83 @@ class DocuFindLocalApp(MDApp):
 
         # Initialize paths
         data_dir = _app_data_dir(self)
+        print(f"\nApp data directory: {data_dir}")
         self.db_path = data_dir / "local_index.sqlite3"
         self.cache_dir = data_dir / "model_cache"
+        print(f"Database path: {self.db_path}")
+        print(f"Cache directory: {self.cache_dir}")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Copy bundled cache if present (for PyInstaller builds)
         _copy_bundled_cache_if_present(self.cache_dir)
+        
+        # Check environment variables BEFORE setting
+        print(f"\nEnvironment variables BEFORE setting:")
+        print(f"  HF_HOME: {os.environ.get('HF_HOME', 'NOT SET')}")
+        print(f"  TRANSFORMERS_CACHE: {os.environ.get('TRANSFORMERS_CACHE', 'NOT SET')}")
+        print(f"  HF_HUB_CACHE: {os.environ.get('HF_HUB_CACHE', 'NOT SET')}")
+        print(f"  FASTEMBED_CACHE_PATH: {os.environ.get('FASTEMBED_CACHE_PATH', 'NOT SET')}")
+        
         os.environ.setdefault("FASTEMBED_CACHE_PATH", str(self.cache_dir))
+        
+        print(f"\nEnvironment variables AFTER setting:")
+        print(f"  HF_HOME: {os.environ.get('HF_HOME', 'NOT SET')}")
+        print(f"  TRANSFORMERS_CACHE: {os.environ.get('TRANSFORMERS_CACHE', 'NOT SET')}")
+        print(f"  HF_HUB_CACHE: {os.environ.get('HF_HUB_CACHE', 'NOT SET')}")
+        print(f"  FASTEMBED_CACHE_PATH: {os.environ.get('FASTEMBED_CACHE_PATH', 'NOT SET')}")
 
         # Indexer/Searcher will be initialized after first-run check
         self.indexer = None
         self.searcher = None
+        
+        print("\nDocuFindLocalApp.build() completed")
+        print("="*80 + "\n")
 
         return self.root
 
     def on_start(self):
         """Called after build() - check if first run is needed."""
-        if self._is_first_run():
+        print("\n" + "="*80)
+        print("DIAGNOSTIC: DocuFindLocalApp.on_start()")
+        print("="*80)
+        
+        is_first = self._is_first_run()
+        print(f"\n_is_first_run() returned: {is_first}")
+        
+        if is_first:
+            print("→ Showing first-run screen")
             # Show first-run screen
             self.root.current = 'first_run'
         else:
+            print("→ Going directly to main app (models exist)")
             # Models exist, go directly to main app
             self._initialize_backends()
             self.root.current = 'main'
+        
+        print("="*80 + "\n")
 
     def _is_first_run(self) -> bool:
         """Check if this is the first run by looking for model files in cache."""
+        print("\n========== DIAGNOSTIC: _is_first_run() ==========")
+        print(f"Cache directory: {self.cache_dir}")
+        print(f"Cache dir exists: {self.cache_dir.exists()}")
+        
         if not self.cache_dir.exists():
+            print("✗ Cache directory does not exist → FIRST RUN")
+            print("================================================\n")
             return True
         
         # Check if cache directory has any model subdirectories
         # fastembed creates directories like "models--BAAI--bge-small-en-v1.5"
         try:
             contents = list(self.cache_dir.iterdir())
+            print(f"\nCache directory contents ({len(contents)} items):")
+            for i, p in enumerate(contents):
+                if i < 20:  # Show first 20 items
+                    print(f"  - {p.name} ({'DIR' if p.is_dir() else 'FILE'})")
+                elif i == 20:
+                    print(f"  ... and {len(contents) - 20} more items")
+            
             # Look for model directories (not just any file)
             model_dirs = [p for p in contents if p.is_dir() and (
                 p.name.startswith("models--") or 
@@ -662,8 +738,18 @@ class DocuFindLocalApp(MDApp):
                 "bge" in p.name.lower() or
                 "clip" in p.name.lower()
             )]
-            return len(model_dirs) == 0
-        except Exception:
+            
+            print(f"\nFound {len(model_dirs)} model directories:")
+            for d in model_dirs:
+                print(f"  ✓ {d.name}")
+            
+            result = len(model_dirs) == 0
+            print(f"\nResult: {'FIRST RUN (no models)' if result else 'NOT FIRST RUN (models exist)'}")
+            print("================================================\n")
+            return result
+        except Exception as e:
+            print(f"✗ Exception while checking cache: {e}")
+            print("================================================\n")
             return True
 
     def _initialize_backends(self) -> None:

@@ -54,6 +54,37 @@ class TextEmbedder:
             arr = arr / norm
         return arr.astype(np.float32)
 
+    def embed_texts_batch(self, texts: list[str]) -> list[np.ndarray]:
+        """Batch embed multiple texts for efficiency."""
+        if self._fastembed is None:
+            raise RuntimeError(f"No embedding backend available: {self._init_error}")
+
+        # Filter empty texts and track indices
+        valid_texts = []
+        valid_indices = []
+        for i, t in enumerate(texts):
+            t = (t or "").strip()
+            if t:
+                valid_texts.append(t)
+                valid_indices.append(i)
+
+        # Initialize result with zeros
+        results: list[np.ndarray] = [np.zeros((1,), dtype=np.float32) for _ in texts]
+
+        if not valid_texts:
+            return results
+
+        # Batch embed all valid texts at once
+        embeddings = list(self._fastembed.embed(valid_texts))
+        for idx, vec in zip(valid_indices, embeddings):
+            arr = np.asarray(vec, dtype=np.float32)
+            norm = float(np.linalg.norm(arr))
+            if norm > 0:
+                arr = arr / norm
+            results[idx] = arr.astype(np.float32)
+
+        return results
+
 
 class ClipEmbedder:
     """CLIP-like embedding wrapper for image search (fastembed ONNX models)."""

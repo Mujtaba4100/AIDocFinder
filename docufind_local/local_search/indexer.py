@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import concurrent.futures
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from threading import Lock
+from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -16,6 +18,11 @@ from .utils import safe_relpath
 
 ProgressCb = Callable[[str], None]
 
+# Batch sizes for efficient processing
+TEXT_BATCH_SIZE = 64
+IMAGE_BATCH_SIZE = 16
+MAX_WORKERS = 4  # Thread pool size for parallel text extraction
+
 
 @dataclass
 class IndexStats:
@@ -23,6 +30,44 @@ class IndexStats:
     indexed: int = 0
     skipped: int = 0
     failed: int = 0
+    _lock: Lock = field(default_factory=Lock, repr=False)
+    
+    def inc_scanned(self) -> None:
+        with self._lock:
+            self.scanned += 1
+    
+    def inc_indexed(self) -> None:
+        with self._lock:
+            self.indexed += 1
+    
+    def inc_skipped(self) -> None:
+        with self._lock:
+            self.skipped += 1
+    
+    def inc_failed(self) -> None:
+        with self._lock:
+            self.failed += 1
+
+
+@dataclass
+class _PendingDoc:
+    """Holds document data pending batch embedding."""
+    file_path: Path
+    rel: str
+    ext: str
+    mtime: int
+    size: int
+    text: str
+
+
+@dataclass
+class _PendingImage:
+    """Holds image data pending batch processing."""
+    file_path: Path
+    rel: str
+    ext: str
+    mtime: int
+    size: int
 
 
 class LocalIndexer:
@@ -46,6 +91,22 @@ class LocalIndexer:
             if ext in SUPPORTED_EXTS:
                 yield p
 
+    def _extract_text_for_file(self, file_path: Path) -> Tuple[Path, str]:
+        """Extract text from a single file (used for parallel processing)."""
+        try:
+            text = (self.extractor.extract(file_path) or "").strip()
+            return (file_path, text)
+        except Exception:
+            return (file_path, "")
+
+    def _extract_ocr_for_image(self, file_path: Path) -> Tuple[Path, str]:
+        """Extract OCR text from a single image (used for parallel processing)."""
+        try:
+            text = (self.extractor.extract(file_path) or "").strip()
+            return (file_path, text)
+        except Exception:
+            return (file_path, "")
+
     def index_folder(self, folder: str | Path, progress: Optional[ProgressCb] = None, recursive: bool = True, file_types: Optional[set[str]] = None) -> IndexStats:
         folder = str(Path(folder).resolve())
         stats = IndexStats()
@@ -55,8 +116,19 @@ class LocalIndexer:
 
         con = open_db(self.db_path)
         try:
-            pending_images: list[tuple[Path, str, str, int, int]] = []
+            # BEGIN TRANSACTION - single transaction for entire indexing
+            con.execute("BEGIN")
+            
+            # Collect files to process
+            files_to_process: List[Tuple[Path, str, str, int, int]] = []  # path, rel, ext, mtime, size
+            pending_images: List[_PendingImage] = []
+            
+            image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}
 
+            # Phase 1: Scan files and check which need processing
+            if progress:
+                progress("Scanning files...")
+                
             for file_path in self.iter_files(folder, recursive=recursive, file_types=file_types):
                 stats.scanned += 1
                 try:
@@ -66,6 +138,7 @@ class LocalIndexer:
                     size = int(st.st_size)
                     ext = file_path.suffix.lower()
 
+                    # Check if already indexed with same mtime/size
                     row = con.execute(
                         "SELECT mtime, size FROM files WHERE path = ?",
                         (str(file_path),),
@@ -75,19 +148,58 @@ class LocalIndexer:
                         stats.skipped += 1
                         continue
 
-                    if ext in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif"}:
-                        pending_images.append((file_path, rel, ext, mtime, size))
-                        continue
+                    # Separate images from documents
+                    if ext in image_exts:
+                        pending_images.append(_PendingImage(file_path, rel, ext, mtime, size))
+                    else:
+                        files_to_process.append((file_path, rel, ext, mtime, size))
 
-                    if progress:
-                        progress(f"Processing: {rel}")
+                except Exception:
+                    stats.failed += 1
+                    continue
 
-                    text = (self.extractor.extract(file_path) or "").strip()
-                    if not text:
+            # Phase 2: Parallel text extraction for documents
+            pending_docs: List[_PendingDoc] = []
+            docs_without_text: List[_PendingDoc] = []
+            
+            if files_to_process:
+                if progress:
+                    progress(f"Extracting text from {len(files_to_process)} documents (parallel)...")
+                
+                # Use thread pool for parallel text extraction
+                with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(self._extract_text_for_file, fp): (fp, rel, ext, mtime, size)
+                        for fp, rel, ext, mtime, size in files_to_process
+                    }
+                    
+                    for future in concurrent.futures.as_completed(futures):
+                        fp, rel, ext, mtime, size = futures[future]
+                        try:
+                            _, text = future.result()
+                            doc = _PendingDoc(fp, rel, ext, mtime, size, text)
+                            if text:
+                                pending_docs.append(doc)
+                            else:
+                                docs_without_text.append(doc)
+                        except Exception:
+                            stats.failed += 1
+
+            # Phase 3: Batch embed all document texts
+            if pending_docs and self.embedder.available:
+                if progress:
+                    progress(f"Batch embedding {len(pending_docs)} documents...")
+                
+                texts = [doc.text for doc in pending_docs]
+                embeddings = self.embedder.embed_texts_batch(texts)
+                
+                for doc, vec in zip(pending_docs, embeddings):
+                    try:
+                        vec_arr = np.asarray(vec, dtype=np.float32)
                         con.execute(
                             """
                             INSERT INTO files(folder, path, rel_path, ext, mtime, size, extracted_text, embedding, embedding_dim, image_embedding, image_embedding_dim, updated_at)
-                            VALUES(?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)
+                            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                             ON CONFLICT(path) DO UPDATE SET
                               folder=excluded.folder,
                               rel_path=excluded.rel_path,
@@ -95,26 +207,25 @@ class LocalIndexer:
                               mtime=excluded.mtime,
                               size=excluded.size,
                               extracted_text=excluded.extracted_text,
-                              embedding=NULL,
-                              embedding_dim=NULL,
+                              embedding=excluded.embedding,
+                              embedding_dim=excluded.embedding_dim,
                               image_embedding=NULL,
                               image_embedding_dim=NULL,
                               updated_at=excluded.updated_at
                             """,
-                            (folder, str(file_path), rel, ext, mtime, size, "", now_ts()),
+                            (folder, str(doc.file_path), doc.rel, doc.ext, doc.mtime, doc.size, doc.text, vec_arr.tobytes(), int(vec_arr.shape[0]), now_ts()),
                         )
-                        con.commit()
                         stats.indexed += 1
-                        continue
+                    except Exception:
+                        stats.failed += 1
 
-                    if not self.embedder.available:
-                        raise RuntimeError(f"Embedding model unavailable: {self.embedder.init_error}")
-
-                    vec = np.asarray(self.embedder.embed_text(text), dtype=np.float32)
+            # Phase 3: Insert documents without text (no embedding needed)
+            for doc in docs_without_text:
+                try:
                     con.execute(
                         """
                         INSERT INTO files(folder, path, rel_path, ext, mtime, size, extracted_text, embedding, embedding_dim, image_embedding, image_embedding_dim, updated_at)
-                        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                        VALUES(?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)
                         ON CONFLICT(path) DO UPDATE SET
                           folder=excluded.folder,
                           rel_path=excluded.rel_path,
@@ -122,49 +233,83 @@ class LocalIndexer:
                           mtime=excluded.mtime,
                           size=excluded.size,
                           extracted_text=excluded.extracted_text,
-                          embedding=excluded.embedding,
-                          embedding_dim=excluded.embedding_dim,
+                          embedding=NULL,
+                          embedding_dim=NULL,
                           image_embedding=NULL,
                           image_embedding_dim=NULL,
                           updated_at=excluded.updated_at
                         """,
-                        (folder, str(file_path), rel, ext, mtime, size, text, vec.tobytes(), int(vec.shape[0]), now_ts()),
+                        (folder, str(doc.file_path), doc.rel, doc.ext, doc.mtime, doc.size, "", now_ts()),
                     )
-                    con.commit()
                     stats.indexed += 1
                 except Exception:
                     stats.failed += 1
-                    continue
 
+            # Phase 4: Process images - batch CLIP embedding + parallel OCR
             if pending_images:
                 if progress:
-                    progress(f"Embedding {len(pending_images)} images...")
+                    progress(f"Processing {len(pending_images)} images...")
 
-                clip_vecs: list[Optional[np.ndarray]] = []
+                # Batch CLIP embeddings for all images (already efficient)
+                clip_vecs: List[Optional[np.ndarray]] = []
                 if self.clip.available:
                     try:
-                        paths = [p for (p, _, _, _, _) in pending_images]
-                        clip_vecs = self.clip.embed_images(paths, batch_size=16)
+                        if progress:
+                            progress(f"CLIP embedding {len(pending_images)} images...")
+                        paths = [img.file_path for img in pending_images]
+                        clip_vecs = self.clip.embed_images(paths, batch_size=IMAGE_BATCH_SIZE)
                     except Exception:
                         clip_vecs = []
 
-                for idx, (img_path, rel, ext, mtime, size) in enumerate(pending_images):
-                    try:
+                # Parallel OCR extraction for images
+                image_texts: List[str] = [""] * len(pending_images)
+                if progress:
+                    progress(f"Parallel OCR on {len(pending_images)} images...")
+                    
+                with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(self._extract_ocr_for_image, img.file_path): idx
+                        for idx, img in enumerate(pending_images)
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        idx = futures[future]
+                        try:
+                            _, text = future.result()
+                            image_texts[idx] = text
+                        except Exception:
+                            pass  # Keep empty string on failure
+
+                # Batch embed image OCR texts (only non-empty ones)
+                text_embeddings: List[Optional[np.ndarray]] = [None] * len(pending_images)
+                if self.embedder.available:
+                    non_empty_indices = [i for i, t in enumerate(image_texts) if t]
+                    if non_empty_indices:
                         if progress:
-                            progress(f"Processing image: {rel}")
+                            progress(f"Embedding {len(non_empty_indices)} image OCR texts...")
+                        non_empty_texts = [image_texts[i] for i in non_empty_indices]
+                        batch_vecs = self.embedder.embed_texts_batch(non_empty_texts)
+                        for idx, vec in zip(non_empty_indices, batch_vecs):
+                            text_embeddings[idx] = vec
 
-                        text = (self.extractor.extract(img_path) or "").strip()
-
+                # Insert all images into DB
+                if progress:
+                    progress(f"Saving {len(pending_images)} images to index...")
+                    
+                for idx, img in enumerate(pending_images):
+                    try:
+                        text = image_texts[idx]
+                        
                         text_blob = None
                         text_dim = None
-                        if text and self.embedder.available:
-                            tv = np.asarray(self.embedder.embed_text(text), dtype=np.float32)
-                            text_blob = tv.tobytes()
-                            text_dim = int(tv.shape[0])
+                        if text_embeddings[idx] is not None:
+                            tv = np.asarray(text_embeddings[idx], dtype=np.float32)
+                            if tv.ndim == 1 and tv.shape[0] > 1:
+                                text_blob = tv.tobytes()
+                                text_dim = int(tv.shape[0])
 
                         img_blob = None
                         img_dim = None
-                        if clip_vecs and idx < len(clip_vecs):
+                        if clip_vecs and idx < len(clip_vecs) and clip_vecs[idx] is not None:
                             iv = np.asarray(clip_vecs[idx], dtype=np.float32)
                             if iv.ndim == 1 and iv.shape[0] > 1:
                                 img_blob = iv.tobytes()
@@ -187,16 +332,27 @@ class LocalIndexer:
                               image_embedding_dim=excluded.image_embedding_dim,
                               updated_at=excluded.updated_at
                             """,
-                            (folder, str(img_path), rel, ext, mtime, size, text, text_blob, text_dim, img_blob, img_dim, now_ts()),
+                            (folder, str(img.file_path), img.rel, img.ext, img.mtime, img.size, text, text_blob, text_dim, img_blob, img_dim, now_ts()),
                         )
-                        con.commit()
                         stats.indexed += 1
                     except Exception:
                         stats.failed += 1
                         continue
+
+            # COMMIT TRANSACTION
+            con.commit()
+
+        except Exception as e:
+            # ROLLBACK on any error
+            try:
+                con.rollback()
+            except Exception:
+                pass
+            raise e
         finally:
             con.close()
 
         if progress:
             progress(f"Done. Indexed: {stats.indexed}, skipped: {stats.skipped}, failed: {stats.failed}")
         return stats
+

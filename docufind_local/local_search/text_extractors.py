@@ -43,7 +43,8 @@ class TextExtractor:
 
     def _extract_pdf(self, path: Path) -> str:
         text = self._extract_pdf_text(path)
-        if text and len(text.strip()) > 30:
+        # If we have meaningful text (>100 chars), skip OCR entirely
+        if text and len(text.strip()) > 100:
             return text
 
         try:
@@ -54,7 +55,8 @@ class TextExtractor:
 
             doc = fitz.open(str(path))
             lines: list[str] = []
-            max_pages = min(5, doc.page_count)
+            # Limit OCR to max 2 pages for speed
+            max_pages = min(2, doc.page_count)
             for i in range(max_pages):
                 page = doc.load_page(i)
                 pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))

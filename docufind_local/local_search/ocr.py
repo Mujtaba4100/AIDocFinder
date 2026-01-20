@@ -45,6 +45,12 @@ class OcrEngine:
                 text = item[1]
                 if text:
                     lines.append(str(text))
-            return "\n".join(lines).strip()
+            raw_text = "\n".join(lines).strip()
+            
+            # Filter useless OCR: if less than 2 words, treat as no text
+            words = raw_text.split()
+            if len(words) < 2:
+                return ""
+            return raw_text
         except Exception:
             return ""

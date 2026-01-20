@@ -120,7 +120,7 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=True,
-    console=False,  # No console window (GUI app)
+    console=True,  # TEMPORARY: Enable console for diagnostics
     icon=str(project_root / "assets" / "icon.ico") if (project_root / "assets" / "icon.ico").exists() else None,
 )
 
@@ -137,4 +137,5 @@ coll = COLLECT(
     upx_exclude=[],
     name='DocuFindLocal',  # Output folder name: dist/DocuFindLocal/
 )
+
 
